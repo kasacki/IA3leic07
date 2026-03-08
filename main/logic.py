@@ -8,8 +8,10 @@ class AnnuvinGame:
         # Initial piece setup (Standard Annuvin: 6 pieces each)
         # Using Axial Coordinates (q, r)
         self.pieces = {
-            1: [(0, 3), (1, 2), (2, 1), (3, 0), (2, 2), (1, 3)], 
-            2: [(0, -3), (-1, -2), (-2, -1), (-3, 0), (-2, -2), (-1, -3)]
+            # Player 1 (Blue) - Bottom Rows
+            1: [(0, 3), (1, 2), (2, 1), (-1, 3), (0, 2), (1, 1)], 
+            # Player 2 (Red) - Top Rows
+            2: [(0, -3), (-1, -2), (-2, -1), (1, -3), (0, -2), (-1, -1)]
         }
 
     def get_max_distance(self, player):
@@ -51,3 +53,18 @@ class AnnuvinGame:
             
         # Switch turns
         self.current_player = opponent
+    
+    def check_winner(self):
+        p1_count = len(self.pieces[1])
+        p2_count = len(self.pieces[2])
+
+        # Condition 1: Elimination
+        if p1_count == 0: return 2
+        if p2_count == 0: return 1
+
+        # Condition 2: Mastery (1 piece vs 6 pieces)
+        # Assuming starting pieces = 6
+        if p1_count == 1 and p2_count == 6: return 2
+        if p2_count == 1 and p1_count == 6: return 1
+
+        return None # No winner yet
