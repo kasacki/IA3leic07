@@ -1,7 +1,7 @@
 import tkinter as tk
 import math
 from logic import AnnuvinGame
-from tkinter import messagebox
+from tkinter import ttk, messagebox
 import ast
 
 class AnnuvinGUI:
@@ -135,3 +135,76 @@ class AnnuvinGUI:
                             messagebox.showinfo("Hint", f"Capture at {target}!")
                             return
         messagebox.showinfo("Hint", "Move any piece forward!")
+
+import tkinter as tk
+from tkinter import ttk, messagebox
+
+class AnnuvinLauncher:
+    def __init__(self, root, on_launch_callback):
+        self.root = root
+        self.on_launch_callback = on_launch_callback # Store the function
+        self.root.title("Annuvin Configuration")
+        self.root.geometry("350x450")
+        self.root.configure(bg="#D2B48C")
+
+        self.setup_ui()
+
+    def setup_ui(self):
+        ttk.Label(self.root, text="ANNUVIN GAME SETTINGS", font=("Arial", 14, "bold"), background="#D2B48C").pack(pady=10)
+
+        # --- Game Mode Selection ---
+        ttk.Label(self.root, text="Select Mode:", background="#D2B48C").pack()
+        self.mode_var = tk.StringVar(value="PVP")
+        modes = [("Person vs Person", "PVP"), ("Person vs AI", "PVAI"), ("AI vs AI", "AVAI")]
+        for text, mode in modes:
+            tk.Radiobutton(self.root, text=text, variable=self.mode_var, value=mode, bg="#D2B48C", command=self.toggle_ai_options).pack(anchor="w", padx=50)
+
+        # --- AI Configuration Frame ---
+        self.ai_frame = tk.Frame(self.root, bg="#D2B48C")
+        self.ai_frame.pack(pady=10)
+
+        # Player 1 (Black)
+        ttk.Label(self.ai_frame, text="Black (P1):", background="#D2B48C").grid(row=0, column=0)
+        self.p1_type = ttk.Combobox(self.ai_frame, values=["Human", "AI"], state="readonly", width=10)
+        self.p1_type.set("Human")
+        self.p1_type.grid(row=0, column=1, padx=5)
+
+        self.p1_diff = ttk.Combobox(self.ai_frame, values=["Beginner", "Medium", "Hard"], state="readonly", width=10)
+        self.p1_diff.set("Beginner")
+        self.p1_diff.grid(row=0, column=2)
+
+        # Player 2 (White)
+        ttk.Label(self.ai_frame, text="White (P2):", background="#D2B48C").grid(row=1, column=0, pady=5)
+        self.p2_type = ttk.Combobox(self.ai_frame, values=["Human", "AI"], state="readonly", width=10)
+        self.p2_type.set("Human")
+        self.p2_type.grid(row=1, column=1, padx=5)
+
+        self.p2_diff = ttk.Combobox(self.ai_frame, values=["Beginner", "Medium", "Hard"], state="readonly", width=10)
+        self.p2_diff.set("Beginner")
+        self.p2_diff.grid(row=1, column=2)
+
+        # Launch Button
+        tk.Button(self.root, text="START GAME", command=self.launch, bg="black", fg="white", font=("Arial", 10, "bold")).pack(pady=20)
+
+    def toggle_ai_options(self):
+        """Auto-sets Human/AI types based on Mode selection."""
+        mode = self.mode_var.get()
+        if mode == "PVP":
+            self.p1_type.set("Human"); self.p2_type.set("Human")
+        elif mode == "PVAI":
+            self.p1_type.set("Human"); self.p2_type.set("AI")
+        elif mode == "AVAI":
+            self.p1_type.set("AI"); self.p2_type.set("AI")
+
+    def launch(self):
+        # Package settings to pass to the game
+        settings = {
+            "mode": self.mode_var.get(),
+            "p1_type": self.p1_type.get(),
+            "p2_type": self.p2_type.get(),
+            "p1_diff": self.p1_diff.get(),
+            "p2_diff": self.p2_diff.get()
+        }
+        self.root.destroy() # Close launcher
+        # We will call the game GUI next
+        self.on_launch_callback(settings)

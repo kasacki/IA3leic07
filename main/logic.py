@@ -5,6 +5,11 @@ class AnnuvinGame:
         self.radius = board_radius
         self.current_player = 1  # 1 (now Black), 2 (now White)
         self.starting_count = 6
+        self.mode = "PVP" # Default: Person vs Person
+        self.player1_type = "Human"
+        self.player2_type = "Human"
+        self.p1_difficulty = "Beginner"
+        self.p2_difficulty = "Beginner"
         
         # New starting coordinates matching image_1.png
         # Validated for Pointy-Topped, Radius 3
