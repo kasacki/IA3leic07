@@ -42,16 +42,20 @@ class AnnuvinGame:
         return True
 
     def execute_move(self, start, end):
-        # Move piece
-        self.pieces[self.current_player].remove(start)
-        self.pieces[self.current_player].append(end)
-        
-        # Capture logic: If opponent is there, remove them
-        opponent = 2 if self.current_player == 1 else 1
+        # 1. Identify players
+        current = self.current_player
+        opponent = 2 if current == 1 else 1
+
+        # 2. Capture: Remove enemy piece if it's at 'end'
         if end in self.pieces[opponent]:
             self.pieces[opponent].remove(end)
+
+        # 3. Move: Update your own piece position
+        # We use index because 'remove' by value can be slow/buggy if duplicates exist
+        idx = self.pieces[current].index(start)
+        self.pieces[current][idx] = end
             
-        # Switch turns
+        # 4. Switch turns
         self.current_player = opponent
     
     def check_winner(self):

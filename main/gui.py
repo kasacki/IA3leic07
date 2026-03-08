@@ -1,3 +1,4 @@
+from tkinter import messagebox
 import tkinter as tk
 import math
 from logic import AnnuvinGame
@@ -66,29 +67,44 @@ class AnnuvinGUI:
     def handle_click(self, event):
         coords = self.pixel_to_hex(event.x, event.y)
         
-        # 1. If nothing is selected, try to select a piece
+        # 1. Selection Phase
         if self.selected_hex is None:
+            # Check if the clicked hex actually contains a piece belonging to current_player
             if coords in self.game.pieces[self.game.current_player]:
                 self.selected_hex = coords
-                print(f"Selected piece at {coords}") # Debug info
+                print(f"Selected YOUR piece at {coords}")
+            else:
+                print(f"Empty hex or enemy piece at {coords} - ignoring.")
         
-        # 2. If a piece is already selected, try to move it
+        # 2. Movement Phase
         else:
-            if self.game.is_valid_move(self.selected_hex, coords):
+            # If you click the SAME piece again, deselect it (cancel move)
+            if coords == self.selected_hex:
+                self.selected_hex = None
+                print("Selection cancelled.")
+            # Try to move
+            elif self.game.is_valid_move(self.selected_hex, coords):
+                print(f"Moving from {self.selected_hex} to {coords}")
                 self.game.execute_move(self.selected_hex, coords)
                 
-                # Win check logic
+                # 1. Redraw the board immediately
+                self.draw_board() 
+                # 2. Force the window to process the drawing commands right now
+                self.root.update_idletasks() 
+                
+                # Winner Check
                 winner = self.game.check_winner()
                 if winner:
                     p_name = "Blue" if winner == 1 else "Red"
-                    self.status_label.config(text=f"GAME OVER: {p_name} Wins!", fg="green")
-                    tk.messagebox.showinfo("Game Over", f"Player {p_name} has won the game!")
+                    messagebox.showinfo("Game Over", f"Player {p_name} has won!")
                 else:
-                    dist = self.game.get_max_distance(self.game.current_player)
                     p_name = "White" if self.game.current_player == 1 else "Black"
+                    dist = self.game.get_max_distance(self.game.current_player)
                     self.status_label.config(text=f"{p_name}'s Turn (Move distance: {dist})")
-            
-            # Deselect after a move attempt (successful or not)
-            self.selected_hex = None
+                
+                self.selected_hex = None # Clear after move
+            else:
+                print("Invalid move target.")
+                self.selected_hex = None # Clear so user can try selecting again
         
         self.draw_board()
