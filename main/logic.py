@@ -3,16 +3,15 @@ import math
 class AnnuvinGame:
     def __init__(self, board_radius=3):
         self.radius = board_radius
-        self.current_player = 1  # 1 for White, 2 for Black
+        self.current_player = 1  # 1 (now Black), 2 (now White)
+        self.starting_count = 6
         
-        # Initial piece setup (Standard Annuvin: 6 pieces each)
-        # Using Axial Coordinates (q, r)
+        # New starting coordinates matching image_1.png
+        # Validated for Pointy-Topped, Radius 3
         self.pieces = {
-            # Player 1 (Blue) - Bottom Rows
-            1: [(0, 3), (1, 2), (2, 1), (-1, 3), (0, 2), (1, 1)], 
-            # Player 2 (Red) - Top Rows
-            2: [(0, -3), (-1, -2), (-2, -1), (1, -3), (0, -2), (-1, -1)]
-        }
+        1: [(-2, 3), (-1, 3), (0, 3), (0, 2), (1, 2), (2, 1)], # Black
+        2: [(2, -3), (1, -3), (0, -3), (0, -2), (-1, -2), (-2, -1)] # White
+    }
 
     def get_max_distance(self, player):
         """The 'Mastery' Rule: 7 minus number of pieces owned."""
