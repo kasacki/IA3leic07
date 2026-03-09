@@ -3,6 +3,7 @@ import math
 from logic import AnnuvinGame
 from tkinter import ttk, messagebox
 import ast
+from engine import AnnuvinAI
 
 class AnnuvinGUI:
     def __init__(self, root):
@@ -36,6 +37,7 @@ class AnnuvinGUI:
         self.canvas.bind("<Button-1>", self.handle_click)
         
         self.draw_board()
+        self.root.after(1000, self.check_for_ai_turn)
 
     def hex_to_pixel(self, q, r):
         # Pointy-Topped Math
@@ -77,12 +79,26 @@ class AnnuvinGUI:
                         self.canvas.create_oval(x-15, y-15, x+15, y+15, fill="white", outline="grey")
 
     def handle_click(self, event):
+        # 1. Block click if it's the AI turn
+        current_type = self.game.player1_type if self.game.current_player == 1 else self.game.player2_type
+        if current_type == "AI":
+            return
+
         coords = self.pixel_to_hex(event.x, event.y)
+        
+        # 2. SELECTION PHASE
         if self.selected_hex is None:
             if coords in self.game.pieces[self.game.current_player]:
                 self.selected_hex = coords
+                # UPDATE: Draw immediately so the "shadow" highlight appears
+                self.draw_board() 
+        
+        # 3. MOVEMENT PHASE
         else:
-            if self.game.is_valid_move(self.selected_hex, coords):
+            # Deselect if clicking the same piece again
+            if coords == self.selected_hex:
+                self.selected_hex = None
+            elif self.game.is_valid_move(self.selected_hex, coords):
                 self.game.execute_move(self.selected_hex, coords)
                 self.draw_board()
                 self.root.update_idletasks()
@@ -95,8 +111,56 @@ class AnnuvinGUI:
                     p_name = "Black" if self.game.current_player == 1 else "White"
                     dist = self.game.get_max_distance(self.game.current_player)
                     self.status_label.config(text=f"{p_name}'s Turn (Move: {dist})")
+                    self.check_for_ai_turn()
+            
+            # Reset selection and refresh board to clear shadows
             self.selected_hex = None
-        self.draw_board()
+            self.draw_board()
+
+    def check_for_ai_turn(self):
+        """Checks if the next player is an AI and schedules the move."""
+        current_type = self.game.player1_type if self.game.current_player == 1 else self.game.player2_type
+        if current_type == "AI":
+            # Small delay so the human can see the previous move
+            self.root.after(1000, self.execute_ai_turn)
+
+    def execute_ai_turn(self):
+        curr_p = self.game.current_player
+        curr_type = self.game.player1_type if curr_p == 1 else self.game.player2_type
+        
+        # If the current player isn't an AI, STOP.
+        if curr_type != "AI":
+            return 
+
+        diff = self.game.p1_difficulty if curr_p == 1 else self.game.p2_difficulty
+        ai_engine = AnnuvinAI(self.game, difficulty=diff)
+        move = ai_engine.decide_move()
+        
+        if move:
+            start, end = move
+            self.game.execute_move(start, end)
+            self.draw_board()
+            self.root.update_idletasks()
+            
+            winner = self.game.check_winner()
+            if winner:
+                p_name = "Black" if winner == 1 else "White"
+                messagebox.showinfo("Game Over", f"AI ({p_name}) has won!")
+                return # Stop everything
+
+            # Turn has now switched in logic.py. Let's see who is next.
+            next_p = self.game.current_player
+            next_type = self.game.player1_type if next_p == 1 else self.game.player2_type
+            p_name = "Black" if next_p == 1 else "White"
+            
+            # Update the label so the Human knows they can move
+            if next_type == "Human":
+                dist = self.game.get_max_distance(next_p)
+                self.status_label.config(text=f"{p_name}'s Turn (Your move! Distance: {dist})")
+            else:
+                self.status_label.config(text=f"{p_name}'s Turn (AI Thinking...)")
+                # Only trigger again if the NEXT player is also an AI
+                self.check_for_ai_turn()
 
     def reset_game(self):
         self.game = AnnuvinGame()

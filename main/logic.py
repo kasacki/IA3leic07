@@ -17,6 +17,23 @@ class AnnuvinGame:
         1: [(-2, 3), (-1, 3), (0, 3), (0, 2), (1, 2), (2, 1)], # Black
         2: [(2, -3), (1, -3), (0, -3), (0, -2), (-1, -2), (-2, -1)] # White
     }
+        
+    def get_all_valid_moves(self, player):
+        """Returns a list of (start_coords, end_coords) for all legal moves."""
+        valid_moves = []
+        # Get all pieces belonging to the player
+        player_pieces = self.pieces[player]
+        
+        for start in player_pieces:
+            # Scan every possible hex on a radius 3 board
+            for q in range(-3, 4):
+                for r in range(-3, 4):
+                    if abs(q + r) <= 3:
+                        target = (q, r)
+                        # Reuse your existing movement logic!
+                        if self.is_valid_move(start, target):
+                            valid_moves.append((start, target))
+        return valid_moves
 
     def get_max_distance(self, player):
         """The 'Mastery' Rule: 7 minus number of pieces owned."""
@@ -60,7 +77,7 @@ class AnnuvinGame:
         self.pieces[current][idx] = end
             
         # 4. Switch turns
-        self.current_player = opponent
+        self.current_player = 2 if self.current_player == 1 else 1
     
     def check_winner(self):
         p1_count = len(self.pieces[1])

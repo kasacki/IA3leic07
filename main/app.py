@@ -6,15 +6,22 @@ def run_game(settings):
     game_root.title("Annuvin Project")
     
     app = AnnuvinGUI(game_root)
-    # Apply the settings
+    
+    # 1. Apply settings immediately
     app.game.mode = settings["mode"]
     app.game.player1_type = settings["p1_type"]
     app.game.player2_type = settings["p2_type"]
     app.game.p1_difficulty = settings["p1_diff"]
     app.game.p2_difficulty = settings["p2_diff"]
+
+    # 2. Set the initial status label correctly based on settings
+    p_type = app.game.player1_type # Black always starts
+    p_name = "Black"
+    app.status_label.config(text=f"{p_name}'s Turn ({p_type})")
     
-    p_name = "Black" if app.game.current_player == 1 else "White"
-    app.status_label.config(text=f"{p_name}'s Turn ({settings['mode']})")
+    # 3. Schedule the first AI check to happen 100ms AFTER the loop starts
+    # This prevents the AI from moving before the window even appears
+    game_root.after(100, app.check_for_ai_turn)
     
     game_root.mainloop()
 
