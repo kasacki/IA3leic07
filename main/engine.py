@@ -25,7 +25,10 @@ class AnnuvinAI:
         elif self.difficulty == "Medium":
             return self.get_minimax_move(depth=2, eval_fn=self._evaluate_medium)
         elif self.difficulty == "Hard":
-            return self.get_minimax_move(depth=4, eval_fn=self._evaluate_hard)
+            return self.get_iterative_deepening_move(time_limit=5)
+        elif self.difficulty == "Custom":
+            # Custom always uses iterative deepening; time_limit must be set
+            return self.get_iterative_deepening_move(self.time_limit or 3)
 
         return random.choice(moves)
 
@@ -54,7 +57,8 @@ class AnnuvinAI:
         return random.choice(moves)
 
     # ------------------------------------------------------------------
-    # Iterative deepening (used by the time slider)
+    # Iterative deepening — used by Hard (5s cap) and Custom (slider)
+    # Always uses the hard evaluation function.
     # ------------------------------------------------------------------
     def get_iterative_deepening_move(self, time_limit):
         player_ai = self.game.current_player
@@ -108,7 +112,7 @@ class AnnuvinAI:
 
             value = self._minimax(
                 sim, depth - 1, alpha, beta,
-                False, player_ai, eval_fn, deadline
+                player_ai, eval_fn, deadline
             )
 
             if value > best_value:
@@ -119,7 +123,7 @@ class AnnuvinAI:
 
         return best_move
 
-    def _minimax(self, game, depth, alpha, beta, maximizing, player_ai, eval_fn, deadline=None):
+    def _minimax(self, game, depth, alpha, beta, player_ai, eval_fn, deadline=None):
         if deadline and time.time() > deadline:
             raise _TimeUp()
 
@@ -129,12 +133,13 @@ class AnnuvinAI:
 
         moves = self._order_moves(game.get_all_valid_moves(game.current_player), game)
 
-        if maximizing:
+        # Maximizing when it's the AI's turn, minimizing when it's the opponent's
+        if game.current_player == player_ai:
             max_eval = -float("inf")
             for move in moves:
                 sim = copy.deepcopy(game)
                 sim.execute_move(*move)
-                val = self._minimax(sim, depth - 1, alpha, beta, False, player_ai, eval_fn, deadline)
+                val = self._minimax(sim, depth - 1, alpha, beta, player_ai, eval_fn, deadline)
                 max_eval = max(max_eval, val)
                 alpha = max(alpha, val)
                 if beta <= alpha:
@@ -145,7 +150,7 @@ class AnnuvinAI:
             for move in moves:
                 sim = copy.deepcopy(game)
                 sim.execute_move(*move)
-                val = self._minimax(sim, depth - 1, alpha, beta, True, player_ai, eval_fn, deadline)
+                val = self._minimax(sim, depth - 1, alpha, beta, player_ai, eval_fn, deadline)
                 min_eval = min(min_eval, val)
                 beta = min(beta, val)
                 if beta <= alpha:
@@ -190,8 +195,10 @@ class AnnuvinAI:
         return total
 
     # ------------------------------------------------------------------
-    # Medium heuristic: material + threats + mobility
-    # Understands captures and danger but not deep positional play
+    # Medium heuristic — depth 2
+    # Pure tactics: only cares about piece count and immediate captures/danger.
+    # Has no concept of position, mobility, or the endgame mastery condition.
+    # Plays reasonable moves but is blind to strategy.
     # ------------------------------------------------------------------
     def _evaluate_medium(self, game, player_ai):
         opponent = 2 if player_ai == 1 else 1
@@ -202,28 +209,23 @@ class AnnuvinAI:
             return -10000
 
         score = 0
-        my_count = len(game.pieces[player_ai])
+        my_count  = len(game.pieces[player_ai])
         opp_count = len(game.pieces[opponent])
 
-        # Material
-        score += (my_count - opp_count) * 100
+        # Material is the dominant factor
+        score += (my_count - opp_count) * 200
 
-        # Mastery distance (the core Annuvin mechanic)
-        score += game.get_max_distance(player_ai) * 10
-        score -= game.get_max_distance(opponent) * 10
-
-        # Immediate capture opportunities and danger
-        score += self._capture_threats(game, player_ai) * 30
-        score -= self._pieces_at_risk(game, player_ai) * 25
-
-        # Mobility
-        score += self._mobility(game, player_ai) * 2
-        score -= self._mobility(game, opponent) * 2
+        # Aware of immediate captures and immediate danger, nothing more
+        score += self._capture_threats(game, player_ai) * 40
+        score -= self._pieces_at_risk(game, player_ai) * 35
 
         return score
 
     # ------------------------------------------------------------------
-    # Hard heuristic: medium + positional + endgame awareness + clustering
+    # Hard heuristic — depth 5
+    # Full positional play: material + mastery mechanic + mobility +
+    # centrality + clustering + endgame awareness.
+    # Understands the core Annuvin rules at a strategic level.
     # ------------------------------------------------------------------
     def _evaluate_hard(self, game, player_ai):
         opponent = 2 if player_ai == 1 else 1
@@ -234,42 +236,52 @@ class AnnuvinAI:
             return -10000
 
         score = 0
-        my_pieces = game.pieces[player_ai]
+        my_pieces  = game.pieces[player_ai]
         opp_pieces = game.pieces[opponent]
-        my_count = len(my_pieces)
-        opp_count = len(opp_pieces)
+        my_count   = len(my_pieces)
+        opp_count  = len(opp_pieces)
 
-        # Material
-        score += (my_count - opp_count) * 100
+        # --- Material ---
+        score += (my_count - opp_count) * 200
 
-        # Mastery distance (crucial: more range = more power)
-        my_dist = game.get_max_distance(player_ai)
+        # --- Mastery distance: the core Annuvin mechanic ---
+        # Fewer pieces = longer reach. Hard understands this as both a
+        # weapon (force opponent to 1 piece) and a danger (avoid being
+        # reduced to 1 piece yourself while opponent still has many).
+        my_dist  = game.get_max_distance(player_ai)
         opp_dist = game.get_max_distance(opponent)
-        score += (my_dist - opp_dist) * 15
+        score += (my_dist - opp_dist) * 20
 
-        # Capture threats and danger
-        score += self._capture_threats(game, player_ai) * 35
-        score -= self._pieces_at_risk(game, player_ai) * 30
+        # --- Immediate tactics ---
+        score += self._capture_threats(game, player_ai) * 50
+        score -= self._pieces_at_risk(game, player_ai) * 45
 
-        # Mobility
-        score += self._mobility(game, player_ai) * 3
-        score -= self._mobility(game, opponent) * 3
+        # --- Mobility: more options = more control ---
+        score += self._mobility(game, player_ai) * 4
+        score -= self._mobility(game, opponent) * 4
 
-        # Endgame awareness: mastery win/loss condition
+        # --- Endgame: explicitly value/fear the mastery win condition ---
+        # Opponent is one piece away from mastery loss
         if opp_count == 1 and my_count > 1:
-            score += 500   # opponent is about to hit mastery loss
+            score += 800
+        # We are one piece away from mastery loss
         if my_count == 1 and opp_count > 1:
-            score -= 500   # we are about to hit mastery loss
+            score -= 800
+        # Opponent dangerously close (2 pieces left)
+        if opp_count == 2:
+            score += 200
+        if my_count == 2:
+            score -= 200
 
-        # Centrality: central pieces have more options
+        # --- Centrality: central pieces threaten more hexes ---
         for q, r in my_pieces:
-            score += (3 - self._hex_dist_from_center(q, r)) * 4
+            score += (3 - self._hex_dist_from_center(q, r)) * 6
         for q, r in opp_pieces:
-            score -= (3 - self._hex_dist_from_center(q, r)) * 4
+            score -= (3 - self._hex_dist_from_center(q, r)) * 6
 
-        # Clustering: pieces near friends are safer
-        score += self._clustering_score(my_pieces) * 3
-        score -= self._clustering_score(opp_pieces) * 3
+        # --- Clustering: pieces near friends are harder to pick off ---
+        score += self._clustering_score(my_pieces) * 5
+        score -= self._clustering_score(opp_pieces) * 5
 
         return score
 

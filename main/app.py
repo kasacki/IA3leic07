@@ -13,6 +13,8 @@ def run_game(settings):
     app.game.player2_type = settings["p2_type"]
     app.game.p1_difficulty = settings["p1_diff"]
     app.game.p2_difficulty = settings["p2_diff"]
+    app.game.p1_time_limit = settings.get("p1_time_limit", None)
+    app.game.p2_time_limit = settings.get("p2_time_limit", None)
 
     # 2. Set the initial status label correctly based on settings
     p_type = app.game.player1_type # Black always starts

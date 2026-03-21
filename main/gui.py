@@ -147,7 +147,7 @@ class AnnuvinGUI:
             return 
 
         diff = self.game.p1_difficulty if curr_p == 1 else self.game.p2_difficulty
-        time_limit = getattr(self.game, "time_limit", None)
+        time_limit = getattr(self.game, "p1_time_limit" if curr_p == 1 else "p2_time_limit", None)
         ai_engine = AnnuvinAI(self.game, difficulty=diff, time_limit=time_limit)
         move = ai_engine.decide_move()
         
@@ -231,102 +231,144 @@ from tkinter import ttk, messagebox
 class AnnuvinLauncher:
     def __init__(self, root, on_launch_callback):
         self.root = root
-        self.on_launch_callback = on_launch_callback # Store the function
+        self.on_launch_callback = on_launch_callback
         self.root.title("Annuvin Configuration")
-        self.root.geometry("370x520")
         self.root.configure(bg="#D2B48C")
-
         self.setup_ui()
+        # Size the window to fit content after widgets are placed
+        self.root.update_idletasks()
+        self.root.resizable(False, False)
 
     def setup_ui(self):
-        ttk.Label(self.root, text="ANNUVIN GAME SETTINGS", font=("Arial", 14, "bold"), background="#D2B48C").pack(pady=10)
+        ttk.Label(
+            self.root, text="ANNUVIN", font=("Arial", 20, "bold"), background="#D2B48C"
+        ).pack(pady=(18, 2))
+        ttk.Label(
+            self.root, text="Game Settings", font=("Arial", 10), background="#D2B48C"
+        ).pack(pady=(0, 14))
 
-        # --- Game Mode Selection ---
-        ttk.Label(self.root, text="Select Mode:", background="#D2B48C").pack()
-        self.mode_var = tk.StringVar(value="PVP")
-        modes = [("Person vs Person", "PVP"), ("Person vs AI", "PVAI"), ("AI vs AI", "AVAI")]
-        for text, mode in modes:
-            tk.Radiobutton(self.root, text=text, variable=self.mode_var, value=mode,
-                           bg="#D2B48C", command=self.toggle_ai_options).pack(anchor="w", padx=50)
+        # --- Player cards ---
+        self._build_player_card(player=1)
+        self._build_player_card(player=2)
 
-        # --- AI Configuration Frame ---
-        self.ai_frame = tk.Frame(self.root, bg="#D2B48C")
-        self.ai_frame.pack(pady=10)
+        # --- Launch button ---
+        tk.Button(
+            self.root, text="START GAME", command=self.launch,
+            bg="black", fg="white", font=("Arial", 11, "bold"),
+            padx=20, pady=6, relief="flat", cursor="hand2"
+        ).pack(pady=20)
 
-        # Header row
-        ttk.Label(self.ai_frame, text="Player",     background="#D2B48C", width=10).grid(row=0, column=0)
-        ttk.Label(self.ai_frame, text="Type",       background="#D2B48C", width=10).grid(row=0, column=1)
-        ttk.Label(self.ai_frame, text="Difficulty", background="#D2B48C", width=10).grid(row=0, column=2)
+    # ------------------------------------------------------------------
+    # Build one player configuration card
+    # ------------------------------------------------------------------
+    def _build_player_card(self, player):
+        label   = "Black (Player 1)" if player == 1 else "White (Player 2)"
+        bg      = "#C4A882"   # slightly darker tan for the card
 
-        # Player 1 (Black)
-        ttk.Label(self.ai_frame, text="Black (P1):", background="#D2B48C").grid(row=1, column=0, pady=4)
-        self.p1_type = ttk.Combobox(self.ai_frame, values=["Human", "AI"], state="readonly", width=9)
-        self.p1_type.set("Human")
-        self.p1_type.grid(row=1, column=1, padx=5)
-        self.p1_diff = ttk.Combobox(self.ai_frame, values=["Beginner", "Medium", "Hard"], state="readonly", width=9)
-        self.p1_diff.set("Beginner")
-        self.p1_diff.grid(row=1, column=2)
+        card = tk.Frame(self.root, bg=bg, bd=1, relief="groove")
+        card.pack(fill="x", padx=30, pady=6)
 
-        # Player 2 (White)
-        ttk.Label(self.ai_frame, text="White (P2):", background="#D2B48C").grid(row=2, column=0, pady=4)
-        self.p2_type = ttk.Combobox(self.ai_frame, values=["Human", "AI"], state="readonly", width=9)
-        self.p2_type.set("Human")
-        self.p2_type.grid(row=2, column=1, padx=5)
-        self.p2_diff = ttk.Combobox(self.ai_frame, values=["Beginner", "Medium", "Hard"], state="readonly", width=9)
-        self.p2_diff.set("Beginner")
-        self.p2_diff.grid(row=2, column=2)
+        # Card title
+        ttk.Label(card, text=label, font=("Arial", 10, "bold"),
+                  background=bg).grid(row=0, column=0, columnspan=3,
+                                      sticky="w", padx=10, pady=(8, 4))
 
-        # --- Think-time slider ---
-        time_frame = tk.Frame(self.root, bg="#D2B48C")
-        time_frame.pack(pady=8, fill="x", padx=30)
+        # --- Human / AI toggle ---
+        type_var = tk.StringVar(value="Human")
+        ttk.Label(card, text="Type:", background=bg).grid(
+            row=1, column=0, sticky="w", padx=10, pady=4)
 
-        ttk.Label(time_frame, text="AI Think Time:", background="#D2B48C").pack(side="left")
-        self.use_time_limit = tk.BooleanVar(value=False)
-        tk.Checkbutton(time_frame, text="Enable", variable=self.use_time_limit,
-                       bg="#D2B48C", command=self._toggle_slider).pack(side="left", padx=6)
+        type_frame = tk.Frame(card, bg=bg)
+        type_frame.grid(row=1, column=1, columnspan=2, sticky="w", pady=4)
 
-        slider_frame = tk.Frame(self.root, bg="#D2B48C")
-        slider_frame.pack(fill="x", padx=30)
+        for val in ("Human", "AI"):
+            tk.Radiobutton(
+                type_frame, text=val, variable=type_var, value=val,
+                bg=bg, activebackground=bg,
+                command=lambda p=player: self._on_type_change(p)
+            ).pack(side="left", padx=4)
 
-        self.time_slider = tk.Scale(
-            slider_frame, from_=1, to=10, resolution=1,
-            orient="horizontal", label="Seconds per move",
-            bg="#D2B48C", length=200, state="disabled"
+        # --- Difficulty dropdown (locked when Human) ---
+        ttk.Label(card, text="Difficulty:", background=bg).grid(
+            row=2, column=0, sticky="w", padx=10, pady=4)
+
+        diff_var = ttk.Combobox(
+            card, values=["Beginner", "Medium", "Hard", "Custom"],
+            state="disabled", width=10
         )
-        self.time_slider.set(3)
-        self.time_slider.pack()
+        diff_var.set("Beginner")
+        diff_var.grid(row=2, column=1, sticky="w", padx=6, pady=4)
 
-        ttk.Label(self.root,
-                  text="(When enabled, overrides difficulty depth\nand uses iterative deepening instead)",
-                  background="#D2B48C", font=("Arial", 8), foreground="#555555").pack()
+        # --- Think-time slider (only enabled when Custom is selected) ---
+        slider_label = ttk.Label(card, text="Think time (s):", background=bg)
+        slider_label.grid(row=3, column=0, sticky="w", padx=10, pady=(4, 8))
 
-        # Launch Button
-        tk.Button(self.root, text="START GAME", command=self.launch,
-                  bg="black", fg="white", font=("Arial", 10, "bold")).pack(pady=15)
+        slider = tk.Scale(
+            card, from_=1, to=10, resolution=1,
+            orient="horizontal", bg=bg, length=160,
+            highlightthickness=0, state="disabled"
+        )
+        slider.set(3)
+        slider.grid(row=3, column=1, columnspan=2, sticky="w", padx=6, pady=(4, 8))
 
-    def _toggle_slider(self):
-        state = "normal" if self.use_time_limit.get() else "disabled"
-        self.time_slider.config(state=state)
+        # Store references so _on_type_change can reach them
+        if player == 1:
+            self.p1_type_var  = type_var
+            self.p1_diff      = diff_var
+            self.p1_slider    = slider
+            self.p1_slider_lbl = slider_label
+            diff_var.bind("<<ComboboxSelected>>", lambda e: self._refresh_slider(1))
+        else:
+            self.p2_type_var  = type_var
+            self.p2_diff      = diff_var
+            self.p2_slider    = slider
+            self.p2_slider_lbl = slider_label
+            diff_var.bind("<<ComboboxSelected>>", lambda e: self._refresh_slider(2))
 
-    def toggle_ai_options(self):
-        """Auto-sets Human/AI types based on Mode selection."""
-        mode = self.mode_var.get()
-        if mode == "PVP":
-            self.p1_type.set("Human"); self.p2_type.set("Human")
-        elif mode == "PVAI":
-            self.p1_type.set("Human"); self.p2_type.set("AI")
-        elif mode == "AVAI":
-            self.p1_type.set("AI"); self.p2_type.set("AI")
+    # ------------------------------------------------------------------
+    # React to Human ↔ AI toggle
+    # ------------------------------------------------------------------
+    def _on_type_change(self, player):
+        if player == 1:
+            is_ai = self.p1_type_var.get() == "AI"
+            self.p1_diff.config(state="readonly" if is_ai else "disabled")
+            # Slider only enabled if AI + Custom
+            self._refresh_slider(1)
+        else:
+            is_ai = self.p2_type_var.get() == "AI"
+            self.p2_diff.config(state="readonly" if is_ai else "disabled")
+            self._refresh_slider(2)
 
+    def _refresh_slider(self, player):
+        if player == 1:
+            active = self.p1_type_var.get() == "AI" and self.p1_diff.get() == "Custom"
+            self.p1_slider.config(state="normal" if active else "disabled")
+        else:
+            active = self.p2_type_var.get() == "AI" and self.p2_diff.get() == "Custom"
+            self.p2_slider.config(state="normal" if active else "disabled")
+
+    # ------------------------------------------------------------------
+    # Launch
+    # ------------------------------------------------------------------
     def launch(self):
-        time_limit = self.time_slider.get() if self.use_time_limit.get() else None
+        p1_is_ai = self.p1_type_var.get() == "AI"
+        p2_is_ai = self.p2_type_var.get() == "AI"
+
+        if p1_is_ai and p2_is_ai:
+            mode = "AVAI"
+        elif p2_is_ai:
+            mode = "PVAI"
+        else:
+            mode = "PVP"
+
         settings = {
-            "mode":       self.mode_var.get(),
-            "p1_type":    self.p1_type.get(),
-            "p2_type":    self.p2_type.get(),
-            "p1_diff":    self.p1_diff.get(),
-            "p2_diff":    self.p2_diff.get(),
-            "time_limit": time_limit,
+            "mode":          mode,
+            "p1_type":       self.p1_type_var.get(),
+            "p2_type":       self.p2_type_var.get(),
+            "p1_diff":       self.p1_diff.get(),
+            "p2_diff":       self.p2_diff.get(),
+            "p1_time_limit": self.p1_slider.get() if (p1_is_ai and self.p1_diff.get() == "Custom") else None,
+            "p2_time_limit": self.p2_slider.get() if (p2_is_ai and self.p2_diff.get() == "Custom") else None,
         }
         self.root.destroy()
         self.on_launch_callback(settings)
