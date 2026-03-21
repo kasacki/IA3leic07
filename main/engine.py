@@ -4,31 +4,28 @@ import time
 
 
 class AnnuvinAI:
-    def __init__(self, game, difficulty="Beginner", time_limit=None):
+    def __init__(self, game, difficulty="Beginner", time_limit=None, depth_limit=None):
         self.game = game
-        self.difficulty = difficulty
-        # time_limit in seconds; overrides depth-based mode if set
-        self.time_limit = time_limit
+        self.difficulty  = difficulty
+        self.time_limit  = time_limit
+        self.depth_limit = depth_limit
 
     def decide_move(self):
         moves = self.game.get_all_valid_moves(self.game.current_player)
         if not moves:
             return None
 
-        # Time-based mode: iterative deepening until time runs out
-        if self.time_limit is not None:
-            return self.get_iterative_deepening_move(self.time_limit)
-
-        # Difficulty-based mode
         if self.difficulty == "Beginner":
             return self._beginner_move(moves)
         elif self.difficulty == "Medium":
-            return self.get_minimax_move(depth=2, eval_fn=self._evaluate_medium)
+            return self.get_minimax_move(depth=1, eval_fn=self._evaluate_medium)
         elif self.difficulty == "Hard":
             return self.get_iterative_deepening_move(time_limit=5)
         elif self.difficulty == "Custom":
-            # Custom always uses iterative deepening; time_limit must be set
-            return self.get_iterative_deepening_move(self.time_limit or 3)
+            if self.depth_limit is not None:
+                return self.get_minimax_move(depth=self.depth_limit, eval_fn=self._evaluate_hard)
+            else:
+                return self.get_iterative_deepening_move(self.time_limit or 3)
 
         return random.choice(moves)
 

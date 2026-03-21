@@ -146,9 +146,10 @@ class AnnuvinGUI:
         if curr_type != "AI":
             return 
 
-        diff = self.game.p1_difficulty if curr_p == 1 else self.game.p2_difficulty
-        time_limit = getattr(self.game, "p1_time_limit" if curr_p == 1 else "p2_time_limit", None)
-        ai_engine = AnnuvinAI(self.game, difficulty=diff, time_limit=time_limit)
+        diff        = self.game.p1_difficulty  if curr_p == 1 else self.game.p2_difficulty
+        time_limit  = getattr(self.game, "p1_time_limit"  if curr_p == 1 else "p2_time_limit",  None)
+        depth_limit = getattr(self.game, "p1_depth_limit" if curr_p == 1 else "p2_depth_limit", None)
+        ai_engine = AnnuvinAI(self.game, difficulty=diff, time_limit=time_limit, depth_limit=depth_limit)
         move = ai_engine.decide_move()
         
         if move:
@@ -299,31 +300,59 @@ class AnnuvinLauncher:
         diff_var.set("Beginner")
         diff_var.grid(row=2, column=1, sticky="w", padx=6, pady=4)
 
-        # --- Think-time slider (only enabled when Custom is selected) ---
-        slider_label = ttk.Label(card, text="Think time (s):", background=bg)
-        slider_label.grid(row=3, column=0, sticky="w", padx=10, pady=(4, 8))
+        # --- Custom controls: time or depth slider (only when Custom selected) ---
+        custom_frame = tk.Frame(card, bg=bg)
+        custom_frame.grid(row=3, column=0, columnspan=3, sticky="w", padx=10, pady=(2, 8))
 
-        slider = tk.Scale(
-            card, from_=1, to=10, resolution=1,
-            orient="horizontal", bg=bg, length=160,
-            highlightthickness=0, state="disabled"
+        # Radio toggle: Time vs Depth
+        custom_mode_var = tk.StringVar(value="time")
+
+        tk.Radiobutton(
+            custom_frame, text="Time (s)", variable=custom_mode_var, value="time",
+            bg=bg, activebackground=bg, state="disabled",
+            command=lambda p=player: self._refresh_custom(p)
+        ).grid(row=0, column=0, sticky="w")
+
+        tk.Radiobutton(
+            custom_frame, text="Depth", variable=custom_mode_var, value="depth",
+            bg=bg, activebackground=bg, state="disabled",
+            command=lambda p=player: self._refresh_custom(p)
+        ).grid(row=0, column=1, sticky="w", padx=(8, 0))
+
+        time_slider = tk.Scale(
+            custom_frame, from_=1, to=15, resolution=1,
+            orient="horizontal", bg=bg, length=180,
+            highlightthickness=0, state="disabled", label="seconds"
         )
-        slider.set(3)
-        slider.grid(row=3, column=1, columnspan=2, sticky="w", padx=6, pady=(4, 8))
+        time_slider.set(3)
+        time_slider.grid(row=1, column=0, columnspan=3, sticky="w")
 
-        # Store references so _on_type_change can reach them
+        depth_slider = tk.Scale(
+            custom_frame, from_=1, to=8, resolution=1,
+            orient="horizontal", bg=bg, length=180,
+            highlightthickness=0, state="disabled", label="half-moves"
+        )
+        depth_slider.set(3)
+        depth_slider.grid(row=1, column=0, columnspan=3, sticky="w")
+        depth_slider.grid_remove()  # hidden by default
+
+        # Store references
         if player == 1:
-            self.p1_type_var  = type_var
-            self.p1_diff      = diff_var
-            self.p1_slider    = slider
-            self.p1_slider_lbl = slider_label
-            diff_var.bind("<<ComboboxSelected>>", lambda e: self._refresh_slider(1))
+            self.p1_type_var      = type_var
+            self.p1_diff          = diff_var
+            self.p1_custom_frame  = custom_frame
+            self.p1_custom_mode   = custom_mode_var
+            self.p1_time_slider   = time_slider
+            self.p1_depth_slider  = depth_slider
+            diff_var.bind("<<ComboboxSelected>>", lambda e: self._refresh_custom(1))
         else:
-            self.p2_type_var  = type_var
-            self.p2_diff      = diff_var
-            self.p2_slider    = slider
-            self.p2_slider_lbl = slider_label
-            diff_var.bind("<<ComboboxSelected>>", lambda e: self._refresh_slider(2))
+            self.p2_type_var      = type_var
+            self.p2_diff          = diff_var
+            self.p2_custom_frame  = custom_frame
+            self.p2_custom_mode   = custom_mode_var
+            self.p2_time_slider   = time_slider
+            self.p2_depth_slider  = depth_slider
+            diff_var.bind("<<ComboboxSelected>>", lambda e: self._refresh_custom(2))
 
     # ------------------------------------------------------------------
     # React to Human ↔ AI toggle
@@ -332,20 +361,44 @@ class AnnuvinLauncher:
         if player == 1:
             is_ai = self.p1_type_var.get() == "AI"
             self.p1_diff.config(state="readonly" if is_ai else "disabled")
-            # Slider only enabled if AI + Custom
-            self._refresh_slider(1)
+            if not is_ai:
+                self.p1_diff.set("Beginner")
         else:
             is_ai = self.p2_type_var.get() == "AI"
             self.p2_diff.config(state="readonly" if is_ai else "disabled")
-            self._refresh_slider(2)
+            if not is_ai:
+                self.p2_diff.set("Beginner")
+        self._refresh_custom(player)
 
-    def _refresh_slider(self, player):
+    def _refresh_custom(self, player):
         if player == 1:
-            active = self.p1_type_var.get() == "AI" and self.p1_diff.get() == "Custom"
-            self.p1_slider.config(state="normal" if active else "disabled")
+            is_custom = self.p1_type_var.get() == "AI" and self.p1_diff.get() == "Custom"
+            mode      = self.p1_custom_mode.get()
+            frame     = self.p1_custom_frame
+            t_sl      = self.p1_time_slider
+            d_sl      = self.p1_depth_slider
         else:
-            active = self.p2_type_var.get() == "AI" and self.p2_diff.get() == "Custom"
-            self.p2_slider.config(state="normal" if active else "disabled")
+            is_custom = self.p2_type_var.get() == "AI" and self.p2_diff.get() == "Custom"
+            mode      = self.p2_custom_mode.get()
+            frame     = self.p2_custom_frame
+            t_sl      = self.p2_time_slider
+            d_sl      = self.p2_depth_slider
+
+        # Enable/disable the radio buttons inside the custom frame
+        for widget in frame.winfo_children():
+            if isinstance(widget, tk.Radiobutton):
+                widget.config(state="normal" if is_custom else "disabled")
+
+        # Show the active slider, hide the other
+        if mode == "time":
+            t_sl.grid()
+            d_sl.grid_remove()
+        else:
+            d_sl.grid()
+            t_sl.grid_remove()
+
+        t_sl.config(state="normal" if (is_custom and mode == "time")  else "disabled")
+        d_sl.config(state="normal" if (is_custom and mode == "depth") else "disabled")
 
     # ------------------------------------------------------------------
     # Launch
@@ -361,14 +414,28 @@ class AnnuvinLauncher:
         else:
             mode = "PVP"
 
+        def get_custom(is_ai, diff, mode_var, t_sl, d_sl):
+            if not is_ai or diff.get() != "Custom":
+                return None, None
+            if mode_var.get() == "time":
+                return t_sl.get(), None
+            else:
+                return None, d_sl.get()
+
+        p1_time, p1_depth = get_custom(p1_is_ai, self.p1_diff, self.p1_custom_mode,
+                                        self.p1_time_slider, self.p1_depth_slider)
+        p2_time, p2_depth = get_custom(p2_is_ai, self.p2_diff, self.p2_custom_mode,
+                                        self.p2_time_slider, self.p2_depth_slider)
         settings = {
-            "mode":          mode,
-            "p1_type":       self.p1_type_var.get(),
-            "p2_type":       self.p2_type_var.get(),
-            "p1_diff":       self.p1_diff.get(),
-            "p2_diff":       self.p2_diff.get(),
-            "p1_time_limit": self.p1_slider.get() if (p1_is_ai and self.p1_diff.get() == "Custom") else None,
-            "p2_time_limit": self.p2_slider.get() if (p2_is_ai and self.p2_diff.get() == "Custom") else None,
+            "mode":           mode,
+            "p1_type":        self.p1_type_var.get(),
+            "p2_type":        self.p2_type_var.get(),
+            "p1_diff":        self.p1_diff.get(),
+            "p2_diff":        self.p2_diff.get(),
+            "p1_time_limit":  p1_time,
+            "p1_depth_limit": p1_depth,
+            "p2_time_limit":  p2_time,
+            "p2_depth_limit": p2_depth,
         }
         self.root.destroy()
         self.on_launch_callback(settings)
