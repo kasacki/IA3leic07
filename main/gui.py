@@ -12,6 +12,7 @@ class AnnuvinGUI:
         self.size = 35
         self.selected_hex = None
         self.hint_move = None   # (start, end) highlighted on the board
+        self.position_history = []  # last N state snapshots for repetition detection
 
         # --- Menu Bar ---
         self.menubar = tk.Menu(root)
@@ -114,6 +115,7 @@ class AnnuvinGUI:
                 self.selected_hex = None
             elif self.game.is_valid_move(self.selected_hex, coords):
                 self.game.execute_move(self.selected_hex, coords)
+                self._record_position()
                 self.draw_board()
                 self.root.update_idletasks()
                 
@@ -149,12 +151,14 @@ class AnnuvinGUI:
         diff        = self.game.p1_difficulty  if curr_p == 1 else self.game.p2_difficulty
         time_limit  = getattr(self.game, "p1_time_limit"  if curr_p == 1 else "p2_time_limit",  None)
         depth_limit = getattr(self.game, "p1_depth_limit" if curr_p == 1 else "p2_depth_limit", None)
-        ai_engine = AnnuvinAI(self.game, difficulty=diff, time_limit=time_limit, depth_limit=depth_limit)
+        ai_engine = AnnuvinAI(self.game, difficulty=diff, time_limit=time_limit,
+                              depth_limit=depth_limit, position_history=list(self.position_history))
         move = ai_engine.decide_move()
         
         if move:
             start, end = move
             self.game.execute_move(start, end)
+            self._record_position()
             self.draw_board()
             self.root.update_idletasks()
             
@@ -178,9 +182,21 @@ class AnnuvinGUI:
                 # Only trigger again if the NEXT player is also an AI
                 self.check_for_ai_turn()
 
+    def _record_position(self):
+        """Snapshot the current board state into history. Keep last 6 entries."""
+        snapshot = (
+            frozenset(self.game.pieces[1]),
+            frozenset(self.game.pieces[2]),
+            self.game.current_player
+        )
+        self.position_history.append(snapshot)
+        if len(self.position_history) > 6:
+            self.position_history.pop(0)
+
     def reset_game(self):
         self.game = AnnuvinGame()
         self.selected_hex = None
+        self.position_history = []
         self.status_label.config(text="Black's Turn (Move: 1)")
         self.draw_board()
 

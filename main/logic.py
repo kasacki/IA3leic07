@@ -21,17 +21,14 @@ class AnnuvinGame:
     def get_all_valid_moves(self, player):
         """Returns a list of (start_coords, end_coords) for all legal moves."""
         valid_moves = []
-        # Get all pieces belonging to the player
         player_pieces = self.pieces[player]
         
         for start in player_pieces:
-            # Scan every possible hex on a radius 3 board
             for q in range(-3, 4):
                 for r in range(-3, 4):
                     if abs(q + r) <= 3:
                         target = (q, r)
-                        # Reuse your existing movement logic!
-                        if self.is_valid_move(start, target):
+                        if self.is_valid_move(start, target, player):
                             valid_moves.append((start, target))
         return valid_moves
 
@@ -43,26 +40,28 @@ class AnnuvinGame:
         """Calculates how many steps between two hexes."""
         return (abs(q1 - q2) + abs(q1 + r1 - q2 - r2) + abs(r1 - r2)) // 2
 
-    def is_valid_move(self, start, end):
+    def is_valid_move(self, start, end, player=None):
+        if player is None:
+            player = self.current_player
 
-      q1, r1 = start
-      q2, r2 = end
+        q1, r1 = start
+        q2, r2 = end
 
-      if start == end:
-        return False
+        if start == end:
+            return False
 
-      if abs(q2) > self.radius or abs(r2) > self.radius or abs(q2 + r2) > self.radius:
-        return False
+        if abs(q2) > self.radius or abs(r2) > self.radius or abs(q2 + r2) > self.radius:
+            return False
 
-      dist = self.get_hex_distance(q1, r1, q2, r2)
+        dist = self.get_hex_distance(q1, r1, q2, r2)
 
-      if dist > self.get_max_distance(self.current_player):
-        return False
+        if dist > self.get_max_distance(player):
+            return False
 
-      if end in self.pieces[self.current_player]:
-        return False
+        if end in self.pieces[player]:
+            return False
 
-      return True
+        return True
     def execute_move(self, start, end):
         # 1. Identify players
         current = self.current_player

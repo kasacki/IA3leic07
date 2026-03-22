@@ -4,11 +4,14 @@ import time
 
 
 class AnnuvinAI:
-    def __init__(self, game, difficulty="Beginner", time_limit=None, depth_limit=None):
+    def __init__(self, game, difficulty="Beginner", time_limit=None, depth_limit=None, position_history=None):
         self.game = game
-        self.difficulty  = difficulty
-        self.time_limit  = time_limit
-        self.depth_limit = depth_limit
+        self.difficulty       = difficulty
+        self.time_limit       = time_limit
+        self.depth_limit      = depth_limit
+        # List of frozenset snapshots of past positions (last ~6 states).
+        # Used to penalise moves that repeat a position we've already been in.
+        self.position_history = position_history or []
 
     def decide_move(self):
         moves = self.game.get_all_valid_moves(self.game.current_player)
@@ -54,9 +57,28 @@ class AnnuvinAI:
         return random.choice(moves)
 
     # ------------------------------------------------------------------
-    # Iterative deepening — used by Hard (5s cap) and Custom (slider)
-    # Always uses the hard evaluation function.
+    # Repetition detection helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _state_snapshot(game):
+        """Hashable representation of the board — used to detect repeated positions."""
+        return (
+            frozenset(game.pieces[1]),
+            frozenset(game.pieces[2]),
+            game.current_player
+        )
+
+    def _repetition_penalty(self, game):
+        """Return a penalty score if this position has been seen in the history."""
+        snapshot = self._state_snapshot(game)
+        count = self.position_history.count(snapshot)
+        if count == 0:
+            return 0
+        # Scale penalty with how many times we've seen it:
+        # once = small nudge, twice+ = strong deterrent
+        return -150 * count
+
+
     def get_iterative_deepening_move(self, time_limit):
         player_ai = self.game.current_player
         deadline = time.time() + time_limit
@@ -216,10 +238,7 @@ class AnnuvinAI:
         score += self._capture_threats(game, player_ai) * 40
         score -= self._pieces_at_risk(game, player_ai) * 35
 
-        return score
-
-    # ------------------------------------------------------------------
-    # Hard heuristic — depth 5
+        return score + self._repetition_penalty(game)
     # Full positional play: material + mastery mechanic + mobility +
     # centrality + clustering + endgame awareness.
     # Understands the core Annuvin rules at a strategic level.
@@ -280,11 +299,6 @@ class AnnuvinAI:
         score += self._clustering_score(my_pieces) * 5
         score -= self._clustering_score(opp_pieces) * 5
 
-        return score
-
-
-# ------------------------------------------------------------------
-# Internal exception used to interrupt iterative deepening
-# ------------------------------------------------------------------
+        return score + self._repetition_penalty(game)
 class _TimeUp(Exception):
     pass
