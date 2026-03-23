@@ -10,6 +10,7 @@ class AnnuvinGame:
         self.player2_type = "Human"
         self.p1_difficulty = "Beginner"
         self.p2_difficulty = "Beginner"
+        self.moves_since_capture = 0  # draw after 20 moves (10 per player) with no capture
         
         # New starting coordinates matching image_1.png
         # Validated for Pointy-Topped, Radius 3
@@ -70,9 +71,11 @@ class AnnuvinGame:
         # 2. Capture: Remove enemy piece if it's at 'end'
         if end in self.pieces[opponent]:
             self.pieces[opponent].remove(end)
+            self.moves_since_capture = 0  # reset on capture
+        else:
+            self.moves_since_capture += 1
 
         # 3. Move: Update your own piece position
-        # We use index because 'remove' by value can be slow/buggy if duplicates exist
         idx = self.pieces[current].index(start)
         self.pieces[current][idx] = end
             
@@ -88,8 +91,10 @@ class AnnuvinGame:
         if p2_count == 0: return 1
 
         # Condition 2: Mastery (1 piece vs 6 pieces)
-        # Assuming starting pieces = 6
         if p1_count == 1 and p2_count == 6: return 2
         if p2_count == 1 and p1_count == 6: return 1
 
-        return None # No winner yet
+        # Condition 3: Draw — 20 consecutive moves with no capture (10 per player)
+        if self.moves_since_capture >= 20: return 0
+
+        return None  # No winner yet

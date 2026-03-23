@@ -68,15 +68,16 @@ class AnnuvinAI:
             game.current_player
         )
 
-    def _repetition_penalty(self, game):
+    def _repetition_penalty(self, game, history):
         """Return a penalty score if this position has been seen in the history."""
         snapshot = self._state_snapshot(game)
-        count = self.position_history.count(snapshot)
+        count = history.count(snapshot)
         if count == 0:
             return 0
-        # Scale penalty with how many times we've seen it:
-        # once = small nudge, twice+ = strong deterrent
-        return -150 * count
+        # First repeat: strong nudge. Second+: overwhelming deterrent.
+        if count == 1:
+            return -400
+        return -1200 * count
 
 
     def get_iterative_deepening_move(self, time_limit):
@@ -90,12 +91,13 @@ class AnnuvinAI:
                 move = self._minimax_root(
                     depth, player_ai,
                     eval_fn=self._evaluate_hard,
-                    deadline=deadline
+                    deadline=deadline,
+                    history=list(self.position_history)
                 )
                 if move is not None:
                     best_move = move
                 depth += 1
-                if depth > 10:   # safety cap
+                if depth > 10:
                     break
             except _TimeUp:
                 break
@@ -107,13 +109,16 @@ class AnnuvinAI:
     # ------------------------------------------------------------------
     def get_minimax_move(self, depth, eval_fn):
         player_ai = self.game.current_player
-        move = self._minimax_root(depth, player_ai, eval_fn=eval_fn)
+        move = self._minimax_root(depth, player_ai, eval_fn=eval_fn,
+                                  history=list(self.position_history))
         if move is None:
             moves = self.game.get_all_valid_moves(player_ai)
             return random.choice(moves)
         return move
 
-    def _minimax_root(self, depth, player_ai, eval_fn, deadline=None):
+    def _minimax_root(self, depth, player_ai, eval_fn, deadline=None, history=None):
+        if history is None:
+            history = []
         moves = self.game.get_all_valid_moves(player_ai)
         moves = self._order_moves(moves, self.game)
 
@@ -128,10 +133,12 @@ class AnnuvinAI:
 
             sim = copy.deepcopy(self.game)
             sim.execute_move(*move)
+            new_snapshot = self._state_snapshot(sim)
+            new_history = history + [new_snapshot]
 
             value = self._minimax(
                 sim, depth - 1, alpha, beta,
-                player_ai, eval_fn, deadline
+                player_ai, eval_fn, deadline, new_history
             )
 
             if value > best_value:
@@ -142,23 +149,29 @@ class AnnuvinAI:
 
         return best_move
 
-    def _minimax(self, game, depth, alpha, beta, player_ai, eval_fn, deadline=None):
+    def _minimax(self, game, depth, alpha, beta, player_ai, eval_fn, deadline=None, history=None):
+        if history is None:
+            history = []
         if deadline and time.time() > deadline:
             raise _TimeUp()
 
         winner = game.check_winner()
-        if depth == 0 or winner is not None:
-            return eval_fn(game, player_ai)
+        if winner is not None:
+            return eval_fn(game, player_ai, history)
+
+        if depth == 0:
+            return self._quiescence(game, alpha, beta, player_ai, eval_fn, deadline, history)
 
         moves = self._order_moves(game.get_all_valid_moves(game.current_player), game)
 
-        # Maximizing when it's the AI's turn, minimizing when it's the opponent's
         if game.current_player == player_ai:
             max_eval = -float("inf")
             for move in moves:
                 sim = copy.deepcopy(game)
                 sim.execute_move(*move)
-                val = self._minimax(sim, depth - 1, alpha, beta, player_ai, eval_fn, deadline)
+                new_snapshot = self._state_snapshot(sim)
+                new_history = history + [new_snapshot]
+                val = self._minimax(sim, depth - 1, alpha, beta, player_ai, eval_fn, deadline, new_history)
                 max_eval = max(max_eval, val)
                 alpha = max(alpha, val)
                 if beta <= alpha:
@@ -169,12 +182,83 @@ class AnnuvinAI:
             for move in moves:
                 sim = copy.deepcopy(game)
                 sim.execute_move(*move)
-                val = self._minimax(sim, depth - 1, alpha, beta, player_ai, eval_fn, deadline)
+                new_snapshot = self._state_snapshot(sim)
+                new_history = history + [new_snapshot]
+                val = self._minimax(sim, depth - 1, alpha, beta, player_ai, eval_fn, deadline, new_history)
                 min_eval = min(min_eval, val)
                 beta = min(beta, val)
                 if beta <= alpha:
                     break
             return min_eval
+
+    # ------------------------------------------------------------------
+    # Quiescence search — called at depth 0 instead of evaluating blindly.
+    # Only searches captures until the position is quiet (no captures left).
+    # Prevents the horizon effect where the AI stops mid-exchange.
+    # ------------------------------------------------------------------
+    def _quiescence(self, game, alpha, beta, player_ai, eval_fn, deadline=None, history=None, qdepth=0):
+        if history is None:
+            history = []
+        if deadline and time.time() > deadline:
+            raise _TimeUp()
+
+        # "Stand-pat" score — what we get if we don't capture anything further
+        stand_pat = eval_fn(game, player_ai, history)
+
+        # Safety cap to prevent infinite quiescence in extreme positions
+        if qdepth >= 4:
+            return stand_pat
+
+        winner = game.check_winner()
+        if winner is not None:
+            return stand_pat
+
+        if game.current_player == player_ai:
+            if stand_pat >= beta:
+                return stand_pat          # beta cutoff
+            alpha = max(alpha, stand_pat)
+
+            # Only look at captures
+            opponent = 2 if player_ai == 1 else 1
+            all_moves = game.get_all_valid_moves(game.current_player)
+            captures = [m for m in all_moves if m[1] in game.pieces[opponent]]
+
+            if not captures:
+                return stand_pat          # position is quiet
+
+            for move in captures:
+                sim = copy.deepcopy(game)
+                sim.execute_move(*move)
+                new_snapshot = self._state_snapshot(sim)
+                new_history = history + [new_snapshot]
+                val = self._quiescence(sim, alpha, beta, player_ai, eval_fn, deadline, new_history, qdepth + 1)
+                alpha = max(alpha, val)
+                if alpha >= beta:
+                    break
+            return alpha
+
+        else:
+            if stand_pat <= alpha:
+                return stand_pat          # alpha cutoff
+            beta = min(beta, stand_pat)
+
+            my_opponent = 2 if player_ai == 1 else 1
+            all_moves = game.get_all_valid_moves(game.current_player)
+            captures = [m for m in all_moves if m[1] in game.pieces[player_ai]]
+
+            if not captures:
+                return stand_pat
+
+            for move in captures:
+                sim = copy.deepcopy(game)
+                sim.execute_move(*move)
+                new_snapshot = self._state_snapshot(sim)
+                new_history = history + [new_snapshot]
+                val = self._quiescence(sim, alpha, beta, player_ai, eval_fn, deadline, new_history, qdepth + 1)
+                beta = min(beta, val)
+                if alpha >= beta:
+                    break
+            return beta
 
     # ==================================================================
     # EVALUATION FUNCTIONS
@@ -219,7 +303,9 @@ class AnnuvinAI:
     # Has no concept of position, mobility, or the endgame mastery condition.
     # Plays reasonable moves but is blind to strategy.
     # ------------------------------------------------------------------
-    def _evaluate_medium(self, game, player_ai):
+    def _evaluate_medium(self, game, player_ai, history=None):
+        if history is None:
+            history = []
         opponent = 2 if player_ai == 1 else 1
         winner = game.check_winner()
         if winner == player_ai:
@@ -231,19 +317,17 @@ class AnnuvinAI:
         my_count  = len(game.pieces[player_ai])
         opp_count = len(game.pieces[opponent])
 
-        # Material is the dominant factor
-        score += (my_count - opp_count) * 200
+        score += (my_count - opp_count) * 1000
+        score += self._capture_threats(game, player_ai) * 80
 
-        # Aware of immediate captures and immediate danger, nothing more
-        score += self._capture_threats(game, player_ai) * 40
-        score -= self._pieces_at_risk(game, player_ai) * 35
-
-        return score + self._repetition_penalty(game)
+        return score + self._repetition_penalty(game, history)
     # Full positional play: material + mastery mechanic + mobility +
     # centrality + clustering + endgame awareness.
     # Understands the core Annuvin rules at a strategic level.
     # ------------------------------------------------------------------
-    def _evaluate_hard(self, game, player_ai):
+    def _evaluate_hard(self, game, player_ai, history=None):
+        if history is None:
+            history = []
         opponent = 2 if player_ai == 1 else 1
         winner = game.check_winner()
         if winner == player_ai:
@@ -257,48 +341,35 @@ class AnnuvinAI:
         my_count   = len(my_pieces)
         opp_count  = len(opp_pieces)
 
-        # --- Material ---
-        score += (my_count - opp_count) * 200
+        # --- Material: dominant term, everything else is a tiebreaker ---
+        score += (my_count - opp_count) * 1000
 
-        # --- Mastery distance: the core Annuvin mechanic ---
-        # Fewer pieces = longer reach. Hard understands this as both a
-        # weapon (force opponent to 1 piece) and a danger (avoid being
-        # reduced to 1 piece yourself while opponent still has many).
-        my_dist  = game.get_max_distance(player_ai)
-        opp_dist = game.get_max_distance(opponent)
-        score += (my_dist - opp_dist) * 20
+        # --- Immediate capture opportunities ---
+        score += self._capture_threats(game, player_ai) * 80
 
-        # --- Immediate tactics ---
-        score += self._capture_threats(game, player_ai) * 50
-        score -= self._pieces_at_risk(game, player_ai) * 45
+        # --- Mobility ---
+        score += self._mobility(game, player_ai) * 3
+        score -= self._mobility(game, opponent) * 3
 
-        # --- Mobility: more options = more control ---
-        score += self._mobility(game, player_ai) * 4
-        score -= self._mobility(game, opponent) * 4
-
-        # --- Endgame: explicitly value/fear the mastery win condition ---
-        # Opponent is one piece away from mastery loss
+        # --- Endgame awareness ---
         if opp_count == 1 and my_count > 1:
             score += 800
-        # We are one piece away from mastery loss
         if my_count == 1 and opp_count > 1:
             score -= 800
-        # Opponent dangerously close (2 pieces left)
         if opp_count == 2:
-            score += 200
+            score += 150
         if my_count == 2:
-            score -= 200
+            score -= 150
 
-        # --- Centrality: central pieces threaten more hexes ---
+        # --- Positional: small tiebreakers only ---
         for q, r in my_pieces:
-            score += (3 - self._hex_dist_from_center(q, r)) * 6
+            score += (3 - self._hex_dist_from_center(q, r)) * 3
         for q, r in opp_pieces:
-            score -= (3 - self._hex_dist_from_center(q, r)) * 6
+            score -= (3 - self._hex_dist_from_center(q, r)) * 3
 
-        # --- Clustering: pieces near friends are harder to pick off ---
-        score += self._clustering_score(my_pieces) * 5
-        score -= self._clustering_score(opp_pieces) * 5
+        score += self._clustering_score(my_pieces) * 2
+        score -= self._clustering_score(opp_pieces) * 2
 
-        return score + self._repetition_penalty(game)
+        return score + self._repetition_penalty(game, history)
 class _TimeUp(Exception):
     pass

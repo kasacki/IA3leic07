@@ -126,10 +126,13 @@ class AnnuvinGUI:
                 self.root.update_idletasks()
                 
                 winner = self.game.check_winner()
-                if winner:
+                if winner is not None:
                     filename = self._save_log(winner)
-                    p_name = "Black" if winner == 1 else "White"
-                    messagebox.showinfo("Game Over", f"Player {p_name} has won!\n\nLog saved to:\n{filename}")
+                    if winner == 0:
+                        messagebox.showinfo("Game Over", f"It's a draw!\n(No captures in 20 moves)\n\nLog saved to:\n{filename}")
+                    else:
+                        p_name = "Black" if winner == 1 else "White"
+                        messagebox.showinfo("Game Over", f"Player {p_name} has won!\n\nLog saved to:\n{filename}")
                 else:
                     p_name = "Black" if self.game.current_player == 1 else "White"
                     dist = self.game.get_max_distance(self.game.current_player)
@@ -174,14 +177,17 @@ class AnnuvinGUI:
             self.root.update_idletasks()
 
             winner = self.game.check_winner()
-            if winner:
+            if winner is not None:
                 filename = self._save_log(winner)
-                p_name = "Black" if winner == 1 else "White"
-                w_label = self._player_label(winner)
-                messagebox.showinfo(
-                    "Game Over",
-                    f"{p_name} ({w_label}) has won!\n\nLog saved to:\n{filename}"
-                )
+                if winner == 0:
+                    messagebox.showinfo("Game Over", f"It's a draw!\n(No captures in 20 moves)\n\nLog saved to:\n{filename}")
+                else:
+                    p_name = "Black" if winner == 1 else "White"
+                    w_label = self._player_label(winner)
+                    messagebox.showinfo(
+                        "Game Over",
+                        f"{p_name} ({w_label}) has won!\n\nLog saved to:\n{filename}"
+                    )
                 return
 
             # Turn has now switched in logic.py. Let's see who is next.
@@ -247,7 +253,9 @@ class AnnuvinGUI:
         lines.append(f"Total time: {total_time:.1f}s")
         lines.append("")
 
-        if winner:
+        if winner == 0:
+            lines.append(f"RESULT: Draw (no captures in 20 moves) after {len(self.move_log)} moves")
+        elif winner:
             w_color = "Black" if winner == 1 else "White"
             w_label = self._player_label(winner)
             lines.append(f"RESULT: {w_color} ({w_label}) won in {len(self.move_log)} moves")
@@ -291,7 +299,7 @@ class AnnuvinGUI:
             self.game.current_player
         )
         self.position_history.append(snapshot)
-        if len(self.position_history) > 6:
+        if len(self.position_history) > 16:
             self.position_history.pop(0)
 
     def _save_log_manual(self):
@@ -312,6 +320,7 @@ class AnnuvinGUI:
             f.write(f"{self.game.current_player}\n")
             f.write(f"{self.game.pieces[1]}\n")
             f.write(f"{self.game.pieces[2]}\n")
+            f.write(f"{self.game.moves_since_capture}\n")
         messagebox.showinfo("Save", "Game state saved to savegame.txt")
 
     def load_game(self):
@@ -321,6 +330,7 @@ class AnnuvinGUI:
                 self.game.current_player = int(lines[0].strip())
                 self.game.pieces[1] = ast.literal_eval(lines[1].strip())
                 self.game.pieces[2] = ast.literal_eval(lines[2].strip())
+                self.game.moves_since_capture = int(lines[3].strip()) if len(lines) > 3 else 0
             self.draw_board()
             messagebox.showinfo("Load", "Game loaded successfully!")
         except Exception as e:
