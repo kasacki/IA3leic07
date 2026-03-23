@@ -1,0 +1,8 @@
+# Ignore everything
+*
+
+# But allow directories (so Git can traverse)
+!*/
+
+# Allow Python files
+!*.py

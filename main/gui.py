@@ -1,5 +1,6 @@
 import tkinter as tk
 import math
+import time
 from logic import AnnuvinGame
 from tkinter import ttk, messagebox
 import ast
@@ -11,8 +12,10 @@ class AnnuvinGUI:
         self.root = root
         self.size = 35
         self.selected_hex = None
-        self.hint_move = None   # (start, end) highlighted on the board
-        self.position_history = []  # last N state snapshots for repetition detection
+        self.hint_move = None
+        self.position_history = []
+        self.move_log = []        # list of dicts, one per move
+        self.game_start_time = time.time()
 
         # --- Menu Bar ---
         self.menubar = tk.Menu(root)
@@ -20,6 +23,7 @@ class AnnuvinGUI:
         self.filemenu.add_command(label="New Game", command=self.reset_game)
         self.filemenu.add_command(label="Save Game", command=self.save_game)
         self.filemenu.add_command(label="Load Game", command=self.load_game)
+        self.filemenu.add_command(label="Save Log",  command=lambda: self._save_log_manual())
         self.filemenu.add_separator()
         self.filemenu.add_command(label="Exit", command=root.quit)
         self.menubar.add_cascade(label="File", menu=self.filemenu)
@@ -105,15 +109,17 @@ class AnnuvinGUI:
         if self.selected_hex is None:
             if coords in self.game.pieces[self.game.current_player]:
                 self.selected_hex = coords
-                # UPDATE: Draw immediately so the "shadow" highlight appears
-                self.draw_board() 
+                self._move_start_time = time.time()
+                self.draw_board()
         
         # 3. MOVEMENT PHASE
         else:
-            # Deselect if clicking the same piece again
             if coords == self.selected_hex:
                 self.selected_hex = None
             elif self.game.is_valid_move(self.selected_hex, coords):
+                elapsed = time.time() - getattr(self, "_move_start_time", time.time())
+                curr_p = self.game.current_player
+                self._log_move(curr_p, self.selected_hex, coords, elapsed)
                 self.game.execute_move(self.selected_hex, coords)
                 self._record_position()
                 self.draw_board()
@@ -121,8 +127,9 @@ class AnnuvinGUI:
                 
                 winner = self.game.check_winner()
                 if winner:
+                    filename = self._save_log(winner)
                     p_name = "Black" if winner == 1 else "White"
-                    messagebox.showinfo("Game Over", f"Player {p_name} has won!")
+                    messagebox.showinfo("Game Over", f"Player {p_name} has won!\n\nLog saved to:\n{filename}")
                 else:
                     p_name = "Black" if self.game.current_player == 1 else "White"
                     dist = self.game.get_max_distance(self.game.current_player)
@@ -153,20 +160,29 @@ class AnnuvinGUI:
         depth_limit = getattr(self.game, "p1_depth_limit" if curr_p == 1 else "p2_depth_limit", None)
         ai_engine = AnnuvinAI(self.game, difficulty=diff, time_limit=time_limit,
                               depth_limit=depth_limit, position_history=list(self.position_history))
+
+        t0 = time.time()
         move = ai_engine.decide_move()
-        
+        elapsed = time.time() - t0
+
         if move:
             start, end = move
+            self._log_move(curr_p, start, end, elapsed)
             self.game.execute_move(start, end)
             self._record_position()
             self.draw_board()
             self.root.update_idletasks()
-            
+
             winner = self.game.check_winner()
             if winner:
+                filename = self._save_log(winner)
                 p_name = "Black" if winner == 1 else "White"
-                messagebox.showinfo("Game Over", f"AI ({p_name}) has won!")
-                return # Stop everything
+                w_label = self._player_label(winner)
+                messagebox.showinfo(
+                    "Game Over",
+                    f"{p_name} ({w_label}) has won!\n\nLog saved to:\n{filename}"
+                )
+                return
 
             # Turn has now switched in logic.py. Let's see who is next.
             next_p = self.game.current_player
@@ -182,6 +198,91 @@ class AnnuvinGUI:
                 # Only trigger again if the NEXT player is also an AI
                 self.check_for_ai_turn()
 
+    def _player_label(self, player_num):
+        """Return a descriptive string for a player, e.g. 'AI (Custom, depth=3)'."""
+        p_type = self.game.player1_type if player_num == 1 else self.game.player2_type
+        if p_type == "Human":
+            return "Human"
+        diff = self.game.p1_difficulty if player_num == 1 else self.game.p2_difficulty
+        if diff == "Custom":
+            depth = getattr(self.game, "p1_depth_limit" if player_num == 1 else "p2_depth_limit", None)
+            tlim  = getattr(self.game, "p1_time_limit"  if player_num == 1 else "p2_time_limit",  None)
+            if depth is not None:
+                return f"AI (Custom, depth={depth})"
+            elif tlim is not None:
+                return f"AI (Custom, time={tlim}s)"
+        return f"AI ({diff})"
+
+    def _log_move(self, player_num, start, end, elapsed):
+        """Append a move record to the move log."""
+        captured = end in self.game.pieces[2 if player_num == 1 else 1]  # check before execute
+        self.move_log.append({
+            "move_num": len(self.move_log) + 1,
+            "player":   player_num,
+            "color":    "Black" if player_num == 1 else "White",
+            "label":    self._player_label(player_num),
+            "start":    start,
+            "end":      end,
+            "elapsed":  elapsed,
+        })
+
+    def _save_log(self, winner):
+        """Write the full game log to a timestamped text file."""
+        import datetime, os
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"game_{timestamp}.txt"
+
+        p1_label = self._player_label(1)
+        p2_label = self._player_label(2)
+
+        total_time = time.time() - self.game_start_time
+
+        lines = []
+        lines.append("=" * 50)
+        lines.append("ANNUVIN GAME LOG")
+        lines.append("=" * 50)
+        lines.append(f"Date     : {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        lines.append(f"Black    : {p1_label}")
+        lines.append(f"White    : {p2_label}")
+        lines.append(f"Total time: {total_time:.1f}s")
+        lines.append("")
+
+        if winner:
+            w_color = "Black" if winner == 1 else "White"
+            w_label = self._player_label(winner)
+            lines.append(f"RESULT: {w_color} ({w_label}) won in {len(self.move_log)} moves")
+        else:
+            lines.append(f"RESULT: Game ended (no winner)")
+        lines.append("")
+        lines.append("-" * 50)
+        lines.append(f"{'#':<5} {'Player':<8} {'Type':<25} {'From':<12} {'To':<12} {'Time(s)'}")
+        lines.append("-" * 50)
+
+        for m in self.move_log:
+            lines.append(
+                f"{m['move_num']:<5} {m['color']:<8} {m['label']:<25} "
+                f"{str(m['start']):<12} {str(m['end']):<12} {m['elapsed']:.3f}"
+            )
+
+        lines.append("-" * 50)
+
+        # Per-player stats
+        for pnum, color in [(1, "Black"), (2, "White")]:
+            pmoves = [m for m in self.move_log if m["player"] == pnum]
+            if pmoves:
+                times = [m["elapsed"] for m in pmoves]
+                lines.append(f"{color} ({self._player_label(pnum)}): "
+                              f"{len(pmoves)} moves, "
+                              f"avg {sum(times)/len(times):.3f}s/move, "
+                              f"total {sum(times):.2f}s")
+
+        lines.append("=" * 50)
+
+        with open(filename, "w") as f:
+            f.write("\n".join(lines) + "\n")
+
+        return filename
+
     def _record_position(self):
         """Snapshot the current board state into history. Keep last 6 entries."""
         snapshot = (
@@ -193,10 +294,16 @@ class AnnuvinGUI:
         if len(self.position_history) > 6:
             self.position_history.pop(0)
 
+    def _save_log_manual(self):
+        filename = self._save_log(winner=None)
+        messagebox.showinfo("Log Saved", f"Game log saved to:\n{filename}")
+
     def reset_game(self):
         self.game = AnnuvinGame()
         self.selected_hex = None
         self.position_history = []
+        self.move_log = []
+        self.game_start_time = time.time()
         self.status_label.config(text="Black's Turn (Move: 1)")
         self.draw_board()
 
