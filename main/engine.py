@@ -1,6 +1,7 @@
 import random
 import copy
 import time
+import math
 
 
 class AnnuvinAI:
@@ -24,6 +25,9 @@ class AnnuvinAI:
             return self.get_minimax_move(depth=1, eval_fn=self._evaluate_medium)
         elif self.difficulty == "Hard":
             return self.get_iterative_deepening_move(time_limit=5)
+        elif self.difficulty == "MCTS":
+            tl = self.time_limit if self.time_limit is not None else 3
+            return self.get_mcts_move(time_limit=tl)
         elif self.difficulty == "Custom":
             if self.depth_limit is not None:
                 return self.get_minimax_move(depth=self.depth_limit, eval_fn=self._evaluate_hard)
@@ -74,11 +78,9 @@ class AnnuvinAI:
         count = history.count(snapshot)
         if count == 0:
             return 0
-        # First repeat: strong nudge. Second+: overwhelming deterrent.
         if count == 1:
             return -400
         return -1200 * count
-
 
     def get_iterative_deepening_move(self, time_limit):
         player_ai = self.game.current_player
@@ -202,10 +204,8 @@ class AnnuvinAI:
         if deadline and time.time() > deadline:
             raise _TimeUp()
 
-        # "Stand-pat" score — what we get if we don't capture anything further
         stand_pat = eval_fn(game, player_ai, history)
 
-        # Safety cap to prevent infinite quiescence in extreme positions
         if qdepth >= 4:
             return stand_pat
 
@@ -215,16 +215,15 @@ class AnnuvinAI:
 
         if game.current_player == player_ai:
             if stand_pat >= beta:
-                return stand_pat          # beta cutoff
+                return stand_pat
             alpha = max(alpha, stand_pat)
 
-            # Only look at captures
             opponent = 2 if player_ai == 1 else 1
             all_moves = game.get_all_valid_moves(game.current_player)
             captures = [m for m in all_moves if m[1] in game.pieces[opponent]]
 
             if not captures:
-                return stand_pat          # position is quiet
+                return stand_pat
 
             for move in captures:
                 sim = copy.deepcopy(game)
@@ -239,10 +238,9 @@ class AnnuvinAI:
 
         else:
             if stand_pat <= alpha:
-                return stand_pat          # alpha cutoff
+                return stand_pat
             beta = min(beta, stand_pat)
 
-            my_opponent = 2 if player_ai == 1 else 1
             all_moves = game.get_all_valid_moves(game.current_player)
             captures = [m for m in all_moves if m[1] in game.pieces[player_ai]]
 
@@ -261,7 +259,132 @@ class AnnuvinAI:
             return beta
 
     # ==================================================================
-    # EVALUATION FUNCTIONS
+    # MONTE CARLO TREE SEARCH
+    # ==================================================================
+
+    def get_mcts_move(self, time_limit=3):
+        """
+        Run MCTS for up to `time_limit` seconds and return the best move found.
+
+        Algorithm outline:
+          1. SELECT   – walk the tree using UCB1 until reaching an unexpanded or terminal node.
+          2. EXPAND   – create one new child for an untried move.
+          3. SIMULATE – play out the game with a biased random rollout.
+          4. BACKPROP – update visit/win counts up the path to the root.
+
+        After the time budget is exhausted the child with the most visits is chosen
+        (the "most robust" child — less sensitive to outlier simulations than
+        choosing purely by win rate).
+        """
+        player_ai = self.game.current_player
+        root = _MCTSNode(game=copy.deepcopy(self.game), parent=None, move=None)
+        deadline = time.time() + time_limit
+
+        while time.time() < deadline:
+            # 1. Selection
+            node = self._mcts_select(root)
+            # 2. Expansion
+            node = self._mcts_expand(node)
+            # 3. Simulation
+            result = self._mcts_simulate(node.game, player_ai)
+            # 4. Backpropagation
+            self._mcts_backpropagate(node, result)
+
+        if not root.children:
+            # Fallback: no simulations ran (e.g. trivial position)
+            moves = self.game.get_all_valid_moves(player_ai)
+            return random.choice(moves) if moves else None
+
+        best_child = max(root.children, key=lambda c: c.visits)
+        return best_child.move
+
+    def _mcts_select(self, node):
+        """
+        Tree policy: descend the tree using UCB1 until we reach a node that is
+        not yet fully expanded, or a terminal node.
+        """
+        while not node.is_terminal():
+            if not node.is_fully_expanded():
+                return node
+            node = node.best_child(c=1.41)
+        return node
+
+    def _mcts_expand(self, node):
+        """
+        Expansion policy: pick one untried move at random, add it as a child.
+        Returns the new child, or the node itself if it is terminal.
+        """
+        if node.is_terminal():
+            return node
+
+        untried = node.untried_moves()
+        move = random.choice(untried)
+
+        sim = copy.deepcopy(node.game)
+        sim.execute_move(*move)
+
+        child = _MCTSNode(game=sim, parent=node, move=move)
+        node.children.append(child)
+        return child
+
+    def _mcts_simulate(self, game, player_ai, max_moves=80):
+        """
+        Default policy (rollout): play randomly until the game ends or the move
+        cap is reached, then score the result from player_ai's perspective.
+
+        A light bias is applied: captures are preferred ~60 % of the time when
+        available. This dramatically improves rollout quality with almost no
+        computational overhead compared to a purely random rollout.
+
+        Returns:
+            1.0  – player_ai wins
+            0.0  – player_ai loses
+            0.5  – draw or move-cap (treat as half-point)
+        """
+        sim = copy.deepcopy(game)
+        moves_played = 0
+
+        while moves_played < max_moves:
+            winner = sim.check_winner()
+            if winner is not None:
+                if winner == 0:
+                    return 0.5
+                return 1.0 if winner == player_ai else 0.0
+
+            moves = sim.get_all_valid_moves(sim.current_player)
+            if not moves:
+                return 0.5
+
+            opponent = 2 if sim.current_player == 1 else 1
+            captures = [m for m in moves if m[1] in sim.pieces[opponent]]
+            if captures and random.random() < 0.6:
+                move = random.choice(captures)
+            else:
+                move = random.choice(moves)
+
+            sim.execute_move(*move)
+            moves_played += 1
+
+        return 0.5   # move cap — treat as draw
+
+    @staticmethod
+    def _mcts_backpropagate(node, result):
+        """
+        Walk from `node` back to the root, incrementing visit counts and
+        adding the result to win totals.
+
+        The result is flipped at each level because each node stores statistics
+        from the perspective of the player who made the move *arriving* at it,
+        which alternates as we climb toward the root.
+        """
+        while node is not None:
+            node.visits += 1
+            node.wins   += result
+            result = 1.0 - result   # flip for the parent's player
+            node = node.parent
+
+    # ==================================================================
+    # EVALUATION FUNCTIONS  (used by Minimax)
     # ==================================================================
 
     def _hex_dist_from_center(self, q, r):
@@ -297,12 +420,8 @@ class AnnuvinAI:
                     total += 1
         return total
 
-    # ------------------------------------------------------------------
-    # Medium heuristic — depth 2
-    # Pure tactics: only cares about piece count and immediate captures/danger.
-    # Has no concept of position, mobility, or the endgame mastery condition.
+    # Medium — depth 1, pure material + immediate threats.
     # Plays reasonable moves but is blind to strategy.
-    # ------------------------------------------------------------------
     def _evaluate_medium(self, game, player_ai, history=None):
         if history is None:
             history = []
@@ -313,7 +432,7 @@ class AnnuvinAI:
         if winner == opponent:
             return -10000
 
-        score = 0
+        score  = 0
         my_count  = len(game.pieces[player_ai])
         opp_count = len(game.pieces[opponent])
 
@@ -321,10 +440,8 @@ class AnnuvinAI:
         score += self._capture_threats(game, player_ai) * 80
 
         return score + self._repetition_penalty(game, history)
-    # Full positional play: material + mastery mechanic + mobility +
-    # centrality + clustering + endgame awareness.
-    # Understands the core Annuvin rules at a strategic level.
-    # ------------------------------------------------------------------
+
+    # Hard — full positional heuristic with mastery awareness.
     def _evaluate_hard(self, game, player_ai, history=None):
         if history is None:
             history = []
@@ -341,17 +458,11 @@ class AnnuvinAI:
         my_count   = len(my_pieces)
         opp_count  = len(opp_pieces)
 
-        # --- Material: dominant term, everything else is a tiebreaker ---
         score += (my_count - opp_count) * 1000
-
-        # --- Immediate capture opportunities ---
         score += self._capture_threats(game, player_ai) * 80
-
-        # --- Mobility ---
         score += self._mobility(game, player_ai) * 3
         score -= self._mobility(game, opponent) * 3
 
-        # --- Endgame awareness ---
         if opp_count == 1 and my_count > 1:
             score += 800
         if my_count == 1 and opp_count > 1:
@@ -361,7 +472,6 @@ class AnnuvinAI:
         if my_count == 2:
             score -= 150
 
-        # --- Positional: small tiebreakers only ---
         for q, r in my_pieces:
             score += (3 - self._hex_dist_from_center(q, r)) * 3
         for q, r in opp_pieces:
@@ -371,5 +481,61 @@ class AnnuvinAI:
         score -= self._clustering_score(opp_pieces) * 2
 
         return score + self._repetition_penalty(game, history)
+
+
+# ==================================================================
+# MCTS Node
+# ==================================================================
+
+class _MCTSNode:
+    """
+    A single node in the MCTS search tree.
+
+    Attributes
+    ----------
+    game     : AnnuvinGame  — board state *after* `move` was applied
+    parent   : _MCTSNode | None
+    move     : tuple | None — (start, end) that produced this state
+    children : list[_MCTSNode]
+    visits   : int          — total simulations through this node
+    wins     : float        — cumulative win score (1=win, 0.5=draw, 0=loss)
+    """
+    __slots__ = ("game", "parent", "move", "children", "visits", "wins", "_untried")
+
+    def __init__(self, game, parent, move):
+        self.game     = game
+        self.parent   = parent
+        self.move     = move
+        self.children = []
+        self.visits   = 0
+        self.wins     = 0.0
+        self._untried = None   # lazily initialised
+
+    def is_terminal(self):
+        return self.game.check_winner() is not None
+
+    def untried_moves(self):
+        """Return the list of moves not yet represented by a child node."""
+        if self._untried is None:
+            all_moves = self.game.get_all_valid_moves(self.game.current_player)
+            self._untried = list(all_moves)
+        tried = {c.move for c in self.children}
+        return [m for m in self._untried if m not in tried]
+
+    def is_fully_expanded(self):
+        return len(self.untried_moves()) == 0
+
+    def best_child(self, c=1.41):
+        """Return the child with the highest UCB1 score."""
+        log_parent = math.log(self.visits) if self.visits > 0 else 0
+
+        def ucb1(child):
+            if child.visits == 0:
+                return float("inf")
+            return (child.wins / child.visits) + c * math.sqrt(log_parent / child.visits)
+
+        return max(self.children, key=ucb1)
+
+
 class _TimeUp(Exception):
     pass

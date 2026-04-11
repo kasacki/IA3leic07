@@ -210,6 +210,9 @@ class AnnuvinGUI:
         if p_type == "Human":
             return "Human"
         diff = self.game.p1_difficulty if player_num == 1 else self.game.p2_difficulty
+        if diff == "MCTS":
+            tlim = getattr(self.game, "p1_time_limit" if player_num == 1 else "p2_time_limit", 3)
+            return f"AI (MCTS, {tlim}s)"
         if diff == "Custom":
             depth = getattr(self.game, "p1_depth_limit" if player_num == 1 else "p2_depth_limit", None)
             tlim  = getattr(self.game, "p1_time_limit"  if player_num == 1 else "p2_time_limit",  None)
@@ -427,7 +430,7 @@ class AnnuvinLauncher:
             row=2, column=0, sticky="w", padx=10, pady=4)
 
         diff_var = ttk.Combobox(
-            card, values=["Beginner", "Medium", "Hard", "Custom"],
+            card, values=["Beginner", "Medium", "Hard", "MCTS", "Custom"],
             state="disabled", width=10
         )
         diff_var.set("Beginner")
@@ -505,21 +508,30 @@ class AnnuvinLauncher:
 
     def _refresh_custom(self, player):
         if player == 1:
-            is_custom = self.p1_type_var.get() == "AI" and self.p1_diff.get() == "Custom"
-            mode      = self.p1_custom_mode.get()
+            diff_val  = self.p1_diff.get()
+            is_custom = self.p1_type_var.get() == "AI" and diff_val == "Custom"
+            is_mcts   = self.p1_type_var.get() == "AI" and diff_val == "MCTS"
+            mode      = self.p1_custom_mode.get() if not is_mcts else "time"
             frame     = self.p1_custom_frame
             t_sl      = self.p1_time_slider
             d_sl      = self.p1_depth_slider
         else:
-            is_custom = self.p2_type_var.get() == "AI" and self.p2_diff.get() == "Custom"
-            mode      = self.p2_custom_mode.get()
+            diff_val  = self.p2_diff.get()
+            is_custom = self.p2_type_var.get() == "AI" and diff_val == "Custom"
+            is_mcts   = self.p2_type_var.get() == "AI" and diff_val == "MCTS"
+            mode      = self.p2_custom_mode.get() if not is_mcts else "time"
             frame     = self.p2_custom_frame
             t_sl      = self.p2_time_slider
             d_sl      = self.p2_depth_slider
 
+        # For MCTS, show the time slider directly (no radio needed)
+        # For Custom, show whichever mode was selected
+        show_slider = is_custom or is_mcts
+
         # Enable/disable the radio buttons inside the custom frame
         for widget in frame.winfo_children():
             if isinstance(widget, tk.Radiobutton):
+                # Radios only make sense for Custom; hide them visually for MCTS
                 widget.config(state="normal" if is_custom else "disabled")
 
         # Show the active slider, hide the other
@@ -530,8 +542,8 @@ class AnnuvinLauncher:
             d_sl.grid()
             t_sl.grid_remove()
 
-        t_sl.config(state="normal" if (is_custom and mode == "time")  else "disabled")
-        d_sl.config(state="normal" if (is_custom and mode == "depth") else "disabled")
+        t_sl.config(state="normal" if (show_slider and mode == "time")  else "disabled")
+        d_sl.config(state="normal" if (is_custom   and mode == "depth") else "disabled")
 
     # ------------------------------------------------------------------
     # Launch
@@ -547,18 +559,24 @@ class AnnuvinLauncher:
         else:
             mode = "PVP"
 
-        def get_custom(is_ai, diff, mode_var, t_sl, d_sl):
-            if not is_ai or diff.get() != "Custom":
+        def get_time_and_depth(is_ai, diff, mode_var, t_sl, d_sl):
+            if not is_ai:
+                return None, None
+            d = diff.get()
+            if d == "MCTS":
+                # MCTS always uses a time budget; expose via time slider
+                return t_sl.get(), None
+            if d != "Custom":
                 return None, None
             if mode_var.get() == "time":
                 return t_sl.get(), None
             else:
                 return None, d_sl.get()
 
-        p1_time, p1_depth = get_custom(p1_is_ai, self.p1_diff, self.p1_custom_mode,
-                                        self.p1_time_slider, self.p1_depth_slider)
-        p2_time, p2_depth = get_custom(p2_is_ai, self.p2_diff, self.p2_custom_mode,
-                                        self.p2_time_slider, self.p2_depth_slider)
+        p1_time, p1_depth = get_time_and_depth(p1_is_ai, self.p1_diff, self.p1_custom_mode,
+                                                self.p1_time_slider, self.p1_depth_slider)
+        p2_time, p2_depth = get_time_and_depth(p2_is_ai, self.p2_diff, self.p2_custom_mode,
+                                                self.p2_time_slider, self.p2_depth_slider)
         settings = {
             "mode":           mode,
             "p1_type":        self.p1_type_var.get(),
