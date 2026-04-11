@@ -1,35 +1,293 @@
 import tkinter as tk
 import math
 import time
-from logic import AnnuvinGame
-from tkinter import ttk, messagebox
+import re
 import ast
+import wave
+import struct
+import tempfile
+import os
+import sys
+import threading
+from logic import AnnuvinGame
+from tkinter import ttk, messagebox, filedialog
 from engine import AnnuvinAI
+
+
+# ==================================================================
+# Cross-platform sound engine
+# ==================================================================
+
+class SoundEngine:
+    """
+    Generates a wooden-thock WAV at startup and plays it cross-platform.
+
+    Priority:
+      1. pygame.mixer  — best latency, works on all three platforms
+      2. subprocess    — aplay (Linux), afplay (macOS), PowerShell (Windows)
+      3. tkinter bell  — silent fallback (just a beep, better than nothing)
+
+    The WAV is created once in a temp file and deleted on exit.
+    """
+
+    def __init__(self):
+        self.muted   = False
+        self.volume  = 0.7          # 0.0 – 1.0
+        self._wav    = None         # path to temp WAV
+        self._pygame = False
+        self._sound  = None         # pygame.Sound object if available
+        self._root   = None         # set later so bell() works
+
+        self._wav = self._generate_wav()
+        self._init_pygame()
+
+    # ------------------------------------------------------------------
+    # WAV generation (pure stdlib — no numpy, no external deps)
+    # ------------------------------------------------------------------
+    def _generate_wav(self):
+        sample_rate = 44100
+        duration    = 0.18
+        n           = int(sample_rate * duration)
+
+        samples = []
+        for i in range(n):
+            t     = i / sample_rate
+            # Woody body: two exponentially-decaying tones
+            body  = math.sin(2 * math.pi * 180 * t) * math.exp(-t * 45)
+            body += math.sin(2 * math.pi * 320 * t) * math.exp(-t * 60) * 0.5
+            # Sharp click transient
+            click = math.sin(2 * math.pi * 900 * t) * math.exp(-t * 200) * 0.4
+            val   = int((body + click) * 28000 * self.volume)
+            samples.append(max(-32767, min(32767, val)))
+
+        fd, path = tempfile.mkstemp(suffix=".wav")
+        os.close(fd)
+        with wave.open(path, "w") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sample_rate)
+            wf.writeframes(struct.pack(f"<{n}h", *samples))
+        return path
+
+    def _init_pygame(self):
+        try:
+            import pygame
+            pygame.mixer.pre_init(44100, -16, 1, 512)
+            pygame.mixer.init()
+            self._sound  = pygame.mixer.Sound(self._wav)
+            self._sound.set_volume(self.volume)
+            self._pygame = True
+        except Exception:
+            self._pygame = False
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def set_root(self, root):
+        self._root = root
+
+    def set_volume(self, vol):
+        """vol: float 0.0–1.0"""
+        self.volume = float(vol)
+        if self._pygame and self._sound:
+            self._sound.set_volume(self.volume)
+        # Regenerate WAV at new volume for subprocess fallback
+        if not self._pygame and self._wav:
+            try:
+                os.unlink(self._wav)
+            except OSError:
+                pass
+            self._wav = self._generate_wav()
+
+    def play(self):
+        if self.muted or self.volume == 0:
+            return
+        if self._pygame and self._sound:
+            self._sound.play()
+        else:
+            # Subprocess fallback — run in background so UI doesn't stall
+            threading.Thread(target=self._play_subprocess, daemon=True).start()
+
+    def _play_subprocess(self):
+        if not self._wav or not os.path.exists(self._wav):
+            return
+        try:
+            if sys.platform.startswith("linux"):
+                os.system(f"aplay -q '{self._wav}' 2>/dev/null")
+            elif sys.platform == "darwin":
+                os.system(f"afplay '{self._wav}'")
+            elif sys.platform == "win32":
+                import ctypes
+                ctypes.windll.winmm.PlaySoundW(self._wav, None, 0x20001)
+        except Exception:
+            if self._root:
+                self._root.bell()
+
+    def cleanup(self):
+        if self._pygame:
+            try:
+                import pygame
+                pygame.mixer.quit()
+            except Exception:
+                pass
+        if self._wav and os.path.exists(self._wav):
+            try:
+                os.unlink(self._wav)
+            except OSError:
+                pass
+
+
+# Singleton — created once at import time
+_sound_engine = SoundEngine()
+
+
+# ==================================================================
+# Log / save-file parser  (handles both formats)
+# ==================================================================
+
+def parse_game_file(text):
+    """
+    Parse either a game-log file or a savegame.txt file.
+
+    Returns a dict with:
+      format        : "log" | "save"
+
+    For "log":
+      p1_label      : str  (e.g. "AI (Medium-ABC)")
+      p2_label      : str
+      moves         : list of (start_coord, end_coord) tuples
+
+    For "save":
+      current_player : int (1 or 2)
+      pieces1        : list of (q,r) tuples
+      pieces2        : list of (q,r) tuples
+      moves_since_capture : int
+    """
+    text = text.strip()
+
+    # ---- Game-log format ----
+    if "ANNUVIN GAME LOG" in text:
+        p1_label, p2_label = "Human", "Human"
+        for line in text.splitlines():
+            s = line.strip()
+            if s.startswith("Black    :") or s.startswith("Black:"):
+                p1_label = s.split(":", 1)[1].strip()
+            elif s.startswith("White    :") or s.startswith("White:"):
+                p2_label = s.split(":", 1)[1].strip()
+
+        moves = []
+        in_table = False
+        for line in text.splitlines():
+            s = line.strip()
+            if s.startswith("#") and "Player" in s:
+                in_table = True
+                continue
+            if not in_table:
+                continue
+            if s.startswith("-") or not s:
+                continue
+            if s[0].isdigit():
+                coords = re.findall(r"\(-?\d+,\s*-?\d+\)", s)
+                if len(coords) >= 2:
+                    moves.append((
+                        ast.literal_eval(coords[0]),
+                        ast.literal_eval(coords[1]),
+                    ))
+
+        return {
+            "format":   "log",
+            "p1_label": p1_label,
+            "p2_label": p2_label,
+            "moves":    moves,
+        }
+
+    # ---- Savegame format (4 plain lines) ----
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    if len(lines) >= 3:
+        try:
+            current_player = int(lines[0])
+            pieces1        = ast.literal_eval(lines[1])
+            pieces2        = ast.literal_eval(lines[2])
+            moves_since    = int(lines[3]) if len(lines) > 3 else 0
+            return {
+                "format":               "save",
+                "current_player":       current_player,
+                "pieces1":              pieces1,
+                "pieces2":              pieces2,
+                "moves_since_capture":  moves_since,
+            }
+        except Exception:
+            pass
+
+    raise ValueError("Unrecognised file format — expected a game log or savegame.txt")
+
+
+def label_to_settings(label):
+    """
+    Convert a player label string (from a log header) to
+    (player_type, difficulty) suitable for the launcher dropdowns.
+
+    Examples:
+      "Human"              -> ("Human", "Beginner")
+      "AI (Medium-ABC)"    -> ("AI",    "Medium-ABC")
+      "AI (Hard-MCTS)"     -> ("AI",    "Hard-MCTS")
+      "AI (Custom-ABC, …)" -> ("AI",    "Custom-ABC")
+    """
+    KNOWN = [
+        "Medium-ABC", "Hard-ABC",
+        "Medium-MCTS", "Hard-MCTS",
+        "Custom-ABC", "Custom-MCTS",
+        "Beginner",
+    ]
+    label = label.strip()
+    if not label.startswith("AI"):
+        return ("Human", "Beginner")
+
+    # Extract the content inside the first pair of parentheses
+    inner = ""
+    if "(" in label:
+        inner = label[label.index("(") + 1:]
+        if ")" in inner:
+            inner = inner[: inner.index(")")]
+
+    for k in KNOWN:
+        if k.lower() in inner.lower() or k.lower() in label.lower():
+            return ("AI", k)
+
+    return ("AI", "Beginner")
+
+
+# ==================================================================
+# In-game GUI
+# ==================================================================
 
 class AnnuvinGUI:
     def __init__(self, root):
-        self.game = AnnuvinGame()
-        self.root = root
-        self.size = 35
-        self.selected_hex  = None
-        self.hint_move     = None
-        self.last_move     = None   # (start, end) of the most recent move for shadow
+        self.game             = AnnuvinGame()
+        self.root             = root
+        self.size             = 35
+        self.selected_hex     = None
+        self.hint_move        = None
+        self.last_move        = None
         self.position_history = []
-        self.move_log      = []
-        self.game_start_time = time.time()
-        self._game_over    = False  # guard against double-log / double-popup
+        self.move_log         = []
+        self.game_start_time  = time.time()
+        self._game_over       = False
+
+        _sound_engine.set_root(root)
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # --- Menu Bar ---
         self.menubar  = tk.Menu(root)
+
         self.filemenu = tk.Menu(self.menubar, tearoff=0)
-        self.filemenu.add_command(label="New Game",       command=self.reset_game)
-        self.filemenu.add_command(label="Save Game",      command=self.save_game)
-        self.filemenu.add_command(label="Load Game",      command=self.load_game)
-        self.filemenu.add_command(label="Load from Log",  command=self.load_from_log)
-        self.filemenu.add_command(label="Save Log",       command=lambda: self._save_log_manual())
+        self.filemenu.add_command(label="New Game", command=self.reset_game)
+        self.filemenu.add_command(label="Save Game", command=self.save_game)
+        self.filemenu.add_command(label="Save Log",  command=self._save_log_manual)
         self.filemenu.add_separator()
-        self.filemenu.add_command(label="Exit", command=root.quit)
+        self.filemenu.add_command(label="Exit", command=self._on_close)
         self.menubar.add_cascade(label="File", menu=self.filemenu)
+
         self.menubar.add_command(label="Get Hint", command=self.suggest_hint)
         root.config(menu=self.menubar)
 
@@ -48,20 +306,24 @@ class AnnuvinGUI:
         self.draw_board()
         self.root.after(1000, self.check_for_ai_turn)
 
+    def _on_close(self):
+        _sound_engine.cleanup()
+        self.root.destroy()
+
     # ------------------------------------------------------------------
     # Coordinate helpers
     # ------------------------------------------------------------------
     def hex_to_pixel(self, q, r):
-        x = self.size * (math.sqrt(3) * q + math.sqrt(3)/2 * r) + 300
-        y = self.size * (3/2 * r) + 250
+        x = self.size * (math.sqrt(3) * q + math.sqrt(3) / 2 * r) + 300
+        y = self.size * (3 / 2 * r) + 250
         return x, y
 
     def pixel_to_hex(self, x, y):
         x, y = x - 300, y - 250
-        q = (math.sqrt(3)/3 * x - 1/3 * y) / self.size
-        r = (2/3 * y) / self.size
+        q    = (math.sqrt(3) / 3 * x - 1 / 3 * y) / self.size
+        r    = (2 / 3 * y) / self.size
         rq, rr = round(q), round(r)
-        rs = round(-q - r)
+        rs   = round(-q - r)
         if abs(rq - q) > abs(rr - r) and abs(rq - q) > abs(rs - (-q - r)):
             rq = -rr - rs
         elif abs(rr - r) > abs(rs - (-q - r)):
@@ -82,10 +344,10 @@ class AnnuvinGUI:
     def draw_board(self):
         self.canvas.delete("all")
 
-        hint_start  = self.hint_move[0] if self.hint_move else None
-        hint_end    = self.hint_move[1] if self.hint_move else None
-        last_start  = self.last_move[0] if self.last_move else None
-        last_end    = self.last_move[1] if self.last_move else None
+        hint_start = self.hint_move[0] if self.hint_move else None
+        hint_end   = self.hint_move[1] if self.hint_move else None
+        last_start = self.last_move[0]  if self.last_move  else None
+        last_end   = self.last_move[1]  if self.last_move  else None
 
         for q in range(-3, 4):
             for r in range(-3, 4):
@@ -94,25 +356,25 @@ class AnnuvinGUI:
                     coord = (q, r)
 
                     if coord == self.selected_hex:
-                        color = "#F0E68C"    # yellow  – selected piece
+                        color = "#F0E68C"   # yellow       – selected
                     elif coord == hint_start:
-                        color = "#90EE90"    # green   – hint origin
+                        color = "#90EE90"   # green        – hint origin
                     elif coord == hint_end:
-                        color = "#87CEEB"    # blue    – hint destination
+                        color = "#87CEEB"   # sky-blue     – hint dest
                     elif coord == last_start:
-                        color = "#FFB347"    # amber   – last-move origin (shadow)
+                        color = "#FFB347"   # amber        – last-move origin
                     elif coord == last_end:
-                        color = "#FFA07A"    # light-salmon – last-move destination
+                        color = "#FFA07A"   # light-salmon – last-move dest
                     else:
                         color = "white"
 
                     self.draw_hexagon(x, y, color)
 
-                    if coord in self.game.pieces[1]:    # Black
-                        self.canvas.create_oval(x-15, y-15, x+15, y+15,
+                    if coord in self.game.pieces[1]:
+                        self.canvas.create_oval(x - 15, y - 15, x + 15, y + 15,
                                                 fill="black", outline="black")
-                    elif coord in self.game.pieces[2]:  # White
-                        self.canvas.create_oval(x-15, y-15, x+15, y+15,
+                    elif coord in self.game.pieces[2]:
+                        self.canvas.create_oval(x - 15, y - 15, x + 15, y + 15,
                                                 fill="white", outline="grey")
 
     # ------------------------------------------------------------------
@@ -130,7 +392,7 @@ class AnnuvinGUI:
 
         if self.selected_hex is None:
             if coords in self.game.pieces[self.game.current_player]:
-                self.selected_hex = coords
+                self.selected_hex     = coords
                 self._move_start_time = time.time()
                 self.draw_board()
         else:
@@ -144,6 +406,7 @@ class AnnuvinGUI:
                 self.game.execute_move(self.selected_hex, coords)
                 self._record_position()
                 self.selected_hex = None
+                _sound_engine.play()
                 self.draw_board()
                 self.root.update_idletasks()
 
@@ -178,16 +441,12 @@ class AnnuvinGUI:
         curr_p    = self.game.current_player
         curr_type = (self.game.player1_type if curr_p == 1
                      else self.game.player2_type)
-
         if curr_type != "AI":
             return
 
-        diff        = (self.game.p1_difficulty  if curr_p == 1
-                       else self.game.p2_difficulty)
-        time_limit  = getattr(self.game,
-                              "p1_time_limit"  if curr_p == 1 else "p2_time_limit",  None)
-        depth_limit = getattr(self.game,
-                              "p1_depth_limit" if curr_p == 1 else "p2_depth_limit", None)
+        diff        = self.game.p1_difficulty  if curr_p == 1 else self.game.p2_difficulty
+        time_limit  = getattr(self.game, "p1_time_limit"  if curr_p == 1 else "p2_time_limit",  None)
+        depth_limit = getattr(self.game, "p1_depth_limit" if curr_p == 1 else "p2_depth_limit", None)
 
         ai_engine = AnnuvinAI(self.game, difficulty=diff,
                               time_limit=time_limit, depth_limit=depth_limit,
@@ -205,6 +464,7 @@ class AnnuvinGUI:
         self.last_move = (start, end)
         self.game.execute_move(start, end)
         self._record_position()
+        _sound_engine.play()
         self.draw_board()
         self.root.update_idletasks()
 
@@ -214,20 +474,18 @@ class AnnuvinGUI:
             return
 
         next_p    = self.game.current_player
-        next_type = (self.game.player1_type if next_p == 1
-                     else self.game.player2_type)
+        next_type = (self.game.player1_type if next_p == 1 else self.game.player2_type)
         p_name    = "Black" if next_p == 1 else "White"
 
         if next_type == "Human":
             dist = self.game.get_max_distance(next_p)
-            self.status_label.config(
-                text=f"{p_name}'s Turn (Your move! Distance: {dist})")
+            self.status_label.config(text=f"{p_name}'s Turn (Your move! Distance: {dist})")
         else:
             self.status_label.config(text=f"{p_name}'s Turn (AI Thinking...)")
             self.check_for_ai_turn()
 
     # ------------------------------------------------------------------
-    # Game-over handler (single point — no double log)
+    # Game-over (single entry point — prevents double log)
     # ------------------------------------------------------------------
     def _end_game(self, winner):
         if self._game_over:
@@ -245,33 +503,25 @@ class AnnuvinGUI:
         messagebox.showinfo("Game Over", msg)
 
     # ------------------------------------------------------------------
-    # Player label helper
+    # Helpers
     # ------------------------------------------------------------------
     def _player_label(self, player_num):
-        p_type = (self.game.player1_type if player_num == 1
-                  else self.game.player2_type)
+        p_type = (self.game.player1_type if player_num == 1 else self.game.player2_type)
         if p_type == "Human":
             return "Human"
-        diff = (self.game.p1_difficulty if player_num == 1
-                else self.game.p2_difficulty)
+        diff = (self.game.p1_difficulty if player_num == 1 else self.game.p2_difficulty)
         if diff == "Custom-MCTS":
-            tlim = getattr(self.game,
-                           "p1_time_limit" if player_num == 1 else "p2_time_limit", 3)
+            tlim = getattr(self.game, "p1_time_limit" if player_num == 1 else "p2_time_limit", 3)
             return f"AI (Custom-MCTS, {tlim}s)"
         if diff == "Custom-ABC":
-            depth = getattr(self.game,
-                            "p1_depth_limit" if player_num == 1 else "p2_depth_limit", None)
-            tlim  = getattr(self.game,
-                            "p1_time_limit"  if player_num == 1 else "p2_time_limit",  None)
+            depth = getattr(self.game, "p1_depth_limit" if player_num == 1 else "p2_depth_limit", None)
+            tlim  = getattr(self.game, "p1_time_limit"  if player_num == 1 else "p2_time_limit",  None)
             if depth is not None:
                 return f"AI (Custom-ABC, depth={depth})"
             elif tlim is not None:
                 return f"AI (Custom-ABC, time={tlim}s)"
         return f"AI ({diff})"
 
-    # ------------------------------------------------------------------
-    # Move logging
-    # ------------------------------------------------------------------
     def _log_move(self, player_num, start, end, elapsed):
         self.move_log.append({
             "move_num": len(self.move_log) + 1,
@@ -285,17 +535,14 @@ class AnnuvinGUI:
 
     def _save_log(self, winner):
         import datetime
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename  = f"game_{timestamp}.txt"
-
-        p1_label   = self._player_label(1)
-        p2_label   = self._player_label(2)
+        timestamp  = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename   = f"game_{timestamp}.txt"
         total_time = time.time() - self.game_start_time
 
         lines = ["=" * 50, "ANNUVIN GAME LOG", "=" * 50]
         lines.append(f"Date     : {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        lines.append(f"Black    : {p1_label}")
-        lines.append(f"White    : {p2_label}")
+        lines.append(f"Black    : {self._player_label(1)}")
+        lines.append(f"White    : {self._player_label(2)}")
         lines.append(f"Total time: {total_time:.1f}s")
         lines.append("")
 
@@ -303,15 +550,13 @@ class AnnuvinGUI:
             lines.append(f"RESULT: Draw (no captures in 20 moves) after {len(self.move_log)} moves")
         elif winner:
             w_color = "Black" if winner == 1 else "White"
-            w_label = self._player_label(winner)
-            lines.append(f"RESULT: {w_color} ({w_label}) won in {len(self.move_log)} moves")
+            lines.append(f"RESULT: {w_color} ({self._player_label(winner)}) won in {len(self.move_log)} moves")
         else:
             lines.append("RESULT: Game ended (no winner)")
 
-        lines.append("")
-        lines.append("-" * 50)
-        lines.append(f"{'#':<5} {'Player':<8} {'Type':<25} {'From':<12} {'To':<12} {'Time(s)'}")
-        lines.append("-" * 50)
+        lines += ["", "-" * 50,
+                  f"{'#':<5} {'Player':<8} {'Type':<25} {'From':<12} {'To':<12} {'Time(s)'}",
+                  "-" * 50]
 
         for m in self.move_log:
             lines.append(
@@ -334,7 +579,6 @@ class AnnuvinGUI:
 
         with open(filename, "w") as f:
             f.write("\n".join(lines) + "\n")
-
         return filename
 
     def _save_log_manual(self):
@@ -342,14 +586,23 @@ class AnnuvinGUI:
         messagebox.showinfo("Log Saved", f"Game log saved to:\n{filename}")
 
     def _record_position(self):
-        snapshot = (
-            frozenset(self.game.pieces[1]),
-            frozenset(self.game.pieces[2]),
-            self.game.current_player
-        )
-        self.position_history.append(snapshot)
+        snap = (frozenset(self.game.pieces[1]),
+                frozenset(self.game.pieces[2]),
+                self.game.current_player)
+        self.position_history.append(snap)
         if len(self.position_history) > 16:
             self.position_history.pop(0)
+
+    def save_game(self):
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename  = f"savegame_{timestamp}.txt"
+        with open(filename, "w") as f:
+            f.write(f"{self.game.current_player}\n")
+            f.write(f"{self.game.pieces[1]}\n")
+            f.write(f"{self.game.pieces[2]}\n")
+            f.write(f"{self.game.moves_since_capture}\n")
+        messagebox.showinfo("Save", f"Game state saved to {filename}")
 
     # ------------------------------------------------------------------
     # Hint
@@ -363,10 +616,10 @@ class AnnuvinGUI:
         ai   = AnnuvinAI(self.game, difficulty="Hard-ABC")
         move = ai.get_minimax_move(depth=2, eval_fn=ai._evaluate_hard)
         if move:
-            start, end = move
             self.hint_move = move
             self.draw_board()
-            messagebox.showinfo("Hint", f"Suggested move:\n  From {start}  →  To {end}")
+            messagebox.showinfo("Hint",
+                                f"Suggested move:\n  From {move[0]}  →  To {move[1]}")
             self.hint_move = None
             self.draw_board()
         else:
@@ -387,203 +640,92 @@ class AnnuvinGUI:
         self.status_label.config(text="Black's Turn (Move: 1)")
         self.draw_board()
 
-    def save_game(self):
-        with open("savegame.txt", "w") as f:
-            f.write(f"{self.game.current_player}\n")
-            f.write(f"{self.game.pieces[1]}\n")
-            f.write(f"{self.game.pieces[2]}\n")
-            f.write(f"{self.game.moves_since_capture}\n")
-        messagebox.showinfo("Save", "Game state saved to savegame.txt")
-
-    def load_game(self):
-        try:
-            with open("savegame.txt", "r") as f:
-                lines = f.readlines()
-            self.game.current_player       = int(lines[0].strip())
-            self.game.pieces[1]            = ast.literal_eval(lines[1].strip())
-            self.game.pieces[2]            = ast.literal_eval(lines[2].strip())
-            self.game.moves_since_capture  = int(lines[3].strip()) if len(lines) > 3 else 0
-            self.last_move  = None
-            self._game_over = False
-            self.draw_board()
-            messagebox.showinfo("Load", "Game loaded successfully!")
-        except Exception as e:
-            messagebox.showerror("Error", f"Could not load: {e}")
-    def load_from_log(self):
-        """Parse a game log file and replay all moves to restore the game state."""
-        from tkinter import filedialog
-        filepath = filedialog.askopenfilename(
-            title="Load Game from Log",
-            filetypes=[("Game logs", "*.txt"), ("All files", "*.*")]
-        )
-        if not filepath:
-            return
-
-        try:
-            with open(filepath, "r") as f:
-                lines = f.readlines()
-
-            # --- Parse header ---
-            p1_label = ""
-            p2_label = ""
-            moves_raw = []
-            in_moves  = False
-
-            for line in lines:
-                line = line.strip()
-                if line.startswith("Black    :"):
-                    p1_label = line.split(":", 1)[1].strip()
-                elif line.startswith("White    :"):
-                    p2_label = line.split(":", 1)[1].strip()
-                elif line.startswith("#") and "Player" in line:
-                    in_moves = True   # header row of the move table
-                    continue
-                elif in_moves and line.startswith("-"):
-                    continue
-                elif in_moves and line and line[0].isdigit():
-                    moves_raw.append(line)
-
-            if not moves_raw:
-                messagebox.showerror("Error", "No moves found in this log file.")
-                return
-
-            # --- Parse moves ---
-            # Format: "1     Black    AI (Medium-ABC)  (-2, 3)   (-3, 3)   0.013"
-            # Coordinates may contain spaces: (-2, 3) splits across tokens
-            parsed_moves = []
-            for row in moves_raw:
-                # Find all (x, y) coordinate pairs using regex
-                import re
-                coords = re.findall(r'\(-?\d+,\s*-?\d+\)', row)
-                if len(coords) >= 2:
-                    parsed_moves.append((
-                        ast.literal_eval(coords[0]),
-                        ast.literal_eval(coords[1])
-                    ))
-
-            if not parsed_moves:
-                messagebox.showerror("Error", "Could not parse any moves from this log.")
-                return
-
-            # --- Reconstruct game by replaying moves silently ---
-            game             = AnnuvinGame()
-            position_history = []
-            move_log         = []
-
-            for idx, (start, end) in enumerate(parsed_moves):
-                player = game.current_player
-                color  = "Black" if player == 1 else "White"
-                label  = p1_label if player == 1 else p2_label
-                move_log.append({
-                    "move_num": idx + 1,
-                    "player":   player,
-                    "color":    color,
-                    "label":    label,
-                    "start":    start,
-                    "end":      end,
-                    "elapsed":  0.0,
-                })
-                game.execute_move(start, end)
-                snapshot = (
-                    frozenset(game.pieces[1]),
-                    frozenset(game.pieces[2]),
-                    game.current_player
-                )
-                position_history.append(snapshot)
-
-            # --- Apply reconstructed state to GUI ---
-            self.game             = game
-            self.move_log         = move_log
-            self.position_history = position_history[-16:]
-            self.selected_hex     = None
-            self.hint_move        = None
-            self.last_move        = parsed_moves[-1] if parsed_moves else None
-            self._game_over       = False
-            self.game_start_time  = time.time()
-
-            # --- Restore player config from log header labels ---
-            known_diffs = [
-                "Medium-ABC", "Hard-ABC", "Medium-MCTS", "Hard-MCTS",
-                "Custom-ABC", "Custom-MCTS", "Beginner"
-            ]
-            for pnum, label in [(1, p1_label), (2, p2_label)]:
-                p_type = "Human"
-                p_diff = "Beginner"
-                if label.startswith("AI"):
-                    p_type = "AI"
-                    inner  = label[label.find("(")+1:label.find(")")] if "(" in label else label
-                    for k in known_diffs:
-                        if k.lower() in inner.lower():
-                            p_diff = k
-                            break
-                if pnum == 1:
-                    self.game.player1_type  = p_type
-                    self.game.p1_difficulty = p_diff
-                else:
-                    self.game.player2_type  = p_type
-                    self.game.p2_difficulty = p_diff
-
-            self.draw_board()
-
-            winner = self.game.check_winner()
-            if winner is not None:
-                self._game_over = True
-                if winner == 0:
-                    messagebox.showinfo("Log Loaded",
-                        f"Loaded {len(parsed_moves)} moves — this game ended in a draw.")
-                else:
-                    w_name = "Black" if winner == 1 else "White"
-                    messagebox.showinfo("Log Loaded",
-                        f"Loaded {len(parsed_moves)} moves — {w_name} already won.\n"
-                        f"Start a New Game to play again.")
-            else:
-                p_name = "Black" if game.current_player == 1 else "White"
-                dist   = game.get_max_distance(game.current_player)
-                self.status_label.config(
-                    text=f"{p_name}'s Turn (Move distance: {dist})"
-                )
-                messagebox.showinfo("Log Loaded",
-                    f"Loaded {len(parsed_moves)} moves.\nGame resumed — it's {p_name}'s turn.")
-                self.root.after(200, self.check_for_ai_turn)
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Could not load log: {e}")
-
 
 # ==================================================================
 # Launcher
 # ==================================================================
 
 class AnnuvinLauncher:
-    # All available difficulty strings, in display order
     DIFFICULTIES = [
         "Beginner",
-        "Medium-ABC",
-        "Hard-ABC",
-        "Medium-MCTS",
-        "Hard-MCTS",
-        "Custom-ABC",
-        "Custom-MCTS",
+        "Medium-ABC", "Hard-ABC",
+        "Medium-MCTS", "Hard-MCTS",
+        "Custom-ABC", "Custom-MCTS",
     ]
-    # Which difficulties need a time slider
-    _TIME_DIFFS  = {"Medium-MCTS", "Hard-MCTS", "Custom-MCTS", "Custom-ABC"}
-    # Which difficulties need a depth slider (Custom-ABC only when depth mode)
-    _DEPTH_DIFFS = {"Custom-ABC"}
 
     def __init__(self, root, on_launch_callback):
         self.root               = root
         self.on_launch_callback = on_launch_callback
-        self.root.title("Annuvin Configuration")
+        self.root.title("Annuvin — Configuration")
         self.root.configure(bg="#D2B48C")
-        self.setup_ui()
+
+        # Loaded-game state (None until a file is loaded)
+        self._loaded_game = None   # dict from parse_game_file, format=="log" only
+        self._loaded_moves = []    # move list replayed into the game
+
+        self._build_menubar()
+        self._build_ui()
+
         self.root.update_idletasks()
         self.root.resizable(False, False)
 
-    def setup_ui(self):
+    # ------------------------------------------------------------------
+    # Menu bar (File + Sound)
+    # ------------------------------------------------------------------
+    def _build_menubar(self):
+        menubar = tk.Menu(self.root)
+
+        # File menu
+        filemenu = tk.Menu(menubar, tearoff=0)
+        filemenu.add_command(label="Load Game…", command=self._load_game_dialog)
+        menubar.add_cascade(label="File", menu=filemenu)
+
+        self.root.config(menu=menubar)
+
+    def _toggle_mute(self):
+        _sound_engine.muted = self._mute_var.get()
+
+    def _on_volume_change(self, val):
+        vol = int(val) / 100.0
+        _sound_engine.set_volume(vol)
+        if vol == 0:
+            self._mute_var.set(True)
+            _sound_engine.muted = True
+        else:
+            self._mute_var.set(False)
+            _sound_engine.muted = False
+
+    # ------------------------------------------------------------------
+    # Main launcher UI
+    # ------------------------------------------------------------------
+    def _build_ui(self):
         ttk.Label(self.root, text="ANNUVIN",
-                  font=("Arial", 20, "bold"), background="#D2B48C").pack(pady=(18, 2))
-        ttk.Label(self.root, text="Game Settings",
-                  font=("Arial", 10), background="#D2B48C").pack(pady=(0, 14))
+                  font=("Arial", 20, "bold"), background="#D2B48C").pack(pady=(10, 2))
+        self._subtitle = ttk.Label(self.root, text="Game Settings",
+                                   font=("Arial", 10), background="#D2B48C")
+        self._subtitle.pack(pady=(0, 6))
+
+        # --- Sound controls ---
+        sound_frame = tk.Frame(self.root, bg="#D2B48C")
+        sound_frame.pack(pady=(0, 8))
+
+        tk.Label(sound_frame, text="🔊", bg="#D2B48C",
+                 font=("Arial", 11)).pack(side="left", padx=(0, 4))
+
+        self._mute_var = tk.BooleanVar(value=_sound_engine.muted)
+        self._vol_slider = tk.Scale(
+            sound_frame, from_=0, to=100, orient="horizontal",
+            length=160, bg="#D2B48C", highlightthickness=0,
+            showvalue=False, command=self._on_volume_change
+        )
+        self._vol_slider.set(int(_sound_engine.volume * 100))
+        self._vol_slider.pack(side="left")
+
+        tk.Checkbutton(
+            sound_frame, text="Mute", variable=self._mute_var,
+            bg="#D2B48C", activebackground="#D2B48C",
+            command=self._toggle_mute
+        ).pack(side="left", padx=(6, 0))
 
         self._build_player_card(player=1)
         self._build_player_card(player=2)
@@ -592,20 +734,111 @@ class AnnuvinLauncher:
             self.root, text="START GAME", command=self.launch,
             bg="black", fg="white", font=("Arial", 11, "bold"),
             padx=20, pady=6, relief="flat", cursor="hand2"
-        ).pack(pady=20)
+        ).pack(pady=18)
 
+    # ------------------------------------------------------------------
+    # Load Game dialog
+    # ------------------------------------------------------------------
+    def _load_game_dialog(self):
+        filepath = filedialog.askopenfilename(
+            title="Load Game",
+            filetypes=[("Game files", "*.txt"), ("All files", "*.*")]
+        )
+        if not filepath:
+            return
+
+        try:
+            with open(filepath, "r") as f:
+                text = f.read()
+            parsed = parse_game_file(text)
+        except Exception as e:
+            messagebox.showerror("Load Error", str(e))
+            return
+
+        if parsed["format"] == "save":
+            # Savegame: no player-type info, just board state.
+            # Pre-fill defaults and let user choose.
+            messagebox.showinfo(
+                "Save file loaded",
+                "Loaded a board snapshot (savegame.txt).\n"
+                "Choose player settings below, then click START GAME.\n"
+                "The board will start from the saved position."
+            )
+            self._loaded_game  = parsed
+            self._loaded_moves = []   # no moves to replay
+            self._subtitle.config(text="Loaded: savegame.txt")
+            return
+
+        # Game log: replay moves to reconstruct board, pre-fill player cards
+        p1_type, p1_diff = label_to_settings(parsed["p1_label"])
+        p2_type, p2_diff = label_to_settings(parsed["p2_label"])
+
+        self._apply_player_defaults(1, p1_type, p1_diff)
+        self._apply_player_defaults(2, p2_type, p2_diff)
+
+        # Replay moves
+        game = AnnuvinGame()
+        for start, end in parsed["moves"]:
+            if game.check_winner() is not None:
+                break
+            game.execute_move(start, end)
+
+        self._loaded_game  = parsed
+        self._loaded_game["_game_obj"] = game
+        self._loaded_moves = parsed["moves"]
+
+        n     = len(parsed["moves"])
+        fname = os.path.basename(filepath)
+        self._subtitle.config(text=f"Loaded: {fname}  ({n} moves)")
+
+        winner = game.check_winner()
+        if winner is not None:
+            label = {0: "Draw", 1: "Black wins", 2: "White wins"}.get(winner, "?")
+            messagebox.showinfo(
+                "Game already finished",
+                f"This log shows a completed game ({label}).\n"
+                f"You can still START GAME to replay it from the beginning, "
+                f"or adjust settings and play a new game."
+            )
+        else:
+            p_name = "Black" if game.current_player == 1 else "White"
+            messagebox.showinfo(
+                "Log loaded",
+                f"{n} moves replayed.\n"
+                f"It is {p_name}'s turn.\n"
+                f"Adjust settings if needed, then click START GAME."
+            )
+
+    def _apply_player_defaults(self, player, p_type, p_diff):
+        """Pre-fill the player card widgets from loaded file info."""
+        if player == 1:
+            type_var = self.p1_type_var
+            diff_cb  = self.p1_diff
+        else:
+            type_var = self.p2_type_var
+            diff_cb  = self.p2_diff
+
+        type_var.set(p_type)
+        self._on_type_change(player)   # enable/disable diff dropdown
+
+        if p_type == "AI" and p_diff in self.DIFFICULTIES:
+            diff_cb.set(p_diff)
+            self._refresh_custom(player)
+
+    # ------------------------------------------------------------------
+    # Player cards
+    # ------------------------------------------------------------------
     def _build_player_card(self, player):
         label = "Black (Player 1)" if player == 1 else "White (Player 2)"
         bg    = "#C4A882"
 
         card = tk.Frame(self.root, bg=bg, bd=1, relief="groove")
-        card.pack(fill="x", padx=30, pady=6)
+        card.pack(fill="x", padx=30, pady=5)
 
         ttk.Label(card, text=label, font=("Arial", 10, "bold"),
                   background=bg).grid(row=0, column=0, columnspan=3,
                                       sticky="w", padx=10, pady=(8, 4))
 
-        # Human / AI toggle
         type_var = tk.StringVar(value="Human")
         ttk.Label(card, text="Type:", background=bg).grid(
             row=1, column=0, sticky="w", padx=10, pady=4)
@@ -619,7 +852,6 @@ class AnnuvinLauncher:
                 command=lambda p=player: self._on_type_change(p)
             ).pack(side="left", padx=4)
 
-        # Difficulty dropdown
         ttk.Label(card, text="Difficulty:", background=bg).grid(
             row=2, column=0, sticky="w", padx=10, pady=4)
 
@@ -628,13 +860,12 @@ class AnnuvinLauncher:
         diff_var.set("Beginner")
         diff_var.grid(row=2, column=1, sticky="w", padx=6, pady=4)
 
-        # Custom controls frame (time / depth sliders)
-        custom_frame = tk.Frame(card, bg=bg)
+        custom_frame    = tk.Frame(card, bg=bg)
         custom_frame.grid(row=3, column=0, columnspan=3,
                           sticky="w", padx=10, pady=(2, 8))
 
-        # Time-vs-depth radio (only relevant for Custom-ABC)
         custom_mode_var = tk.StringVar(value="time")
+
         rb_time = tk.Radiobutton(
             custom_frame, text="Time (s)", variable=custom_mode_var, value="time",
             bg=bg, activebackground=bg, state="disabled",
@@ -666,7 +897,6 @@ class AnnuvinLauncher:
         depth_slider.grid(row=1, column=0, columnspan=3, sticky="w")
         depth_slider.grid_remove()
 
-        # Store widget references per player
         if player == 1:
             self.p1_type_var     = type_var
             self.p1_diff         = diff_var
@@ -703,44 +933,30 @@ class AnnuvinLauncher:
 
     def _refresh_custom(self, player):
         if player == 1:
-            diff_val   = self.p1_diff.get()
-            is_ai      = self.p1_type_var.get() == "AI"
-            mode       = self.p1_custom_mode.get()
-            t_sl       = self.p1_time_slider
-            d_sl       = self.p1_depth_slider
-            rb_t       = self.p1_rb_time
-            rb_d       = self.p1_rb_depth
+            diff_val = self.p1_diff.get()
+            is_ai    = self.p1_type_var.get() == "AI"
+            mode     = self.p1_custom_mode.get()
+            t_sl, d_sl, rb_t, rb_d = (self.p1_time_slider, self.p1_depth_slider,
+                                       self.p1_rb_time,    self.p1_rb_depth)
         else:
-            diff_val   = self.p2_diff.get()
-            is_ai      = self.p2_type_var.get() == "AI"
-            mode       = self.p2_custom_mode.get()
-            t_sl       = self.p2_time_slider
-            d_sl       = self.p2_depth_slider
-            rb_t       = self.p2_rb_time
-            rb_d       = self.p2_rb_depth
+            diff_val = self.p2_diff.get()
+            is_ai    = self.p2_type_var.get() == "AI"
+            mode     = self.p2_custom_mode.get()
+            t_sl, d_sl, rb_t, rb_d = (self.p2_time_slider, self.p2_depth_slider,
+                                       self.p2_rb_time,    self.p2_rb_depth)
 
-        # Determine what controls to show
         is_custom_abc  = is_ai and diff_val == "Custom-ABC"
         is_mcts_custom = is_ai and diff_val == "Custom-MCTS"
-        # Medium/Hard MCTS also expose a time slider (read-only defaults)
-        is_mcts_preset = is_ai and diff_val in ("Medium-MCTS", "Hard-MCTS")
+        show_time      = is_custom_abc or is_mcts_custom
 
-        show_time  = is_custom_abc or is_mcts_custom
-        show_radios = is_custom_abc   # only Custom-ABC gets the time/depth toggle
+        rb_t.config(state="normal" if is_custom_abc else "disabled")
+        rb_d.config(state="normal" if is_custom_abc else "disabled")
 
-        # Radios
-        rb_t.config(state="normal" if show_radios else "disabled")
-        rb_d.config(state="normal" if show_radios else "disabled")
-
-        # For Custom-ABC honour the radio; for MCTS variants always show time
         effective_mode = mode if is_custom_abc else "time"
-
-        if effective_mode == "time" or is_mcts_custom or is_mcts_preset:
-            t_sl.grid()
-            d_sl.grid_remove()
+        if effective_mode == "time" or is_mcts_custom:
+            t_sl.grid(); d_sl.grid_remove()
         else:
-            d_sl.grid()
-            t_sl.grid_remove()
+            d_sl.grid(); t_sl.grid_remove()
 
         t_sl.config(state="normal" if show_time else "disabled")
         d_sl.config(state="normal" if (is_custom_abc and mode == "depth") else "disabled")
@@ -752,26 +968,16 @@ class AnnuvinLauncher:
         p1_is_ai = self.p1_type_var.get() == "AI"
         p2_is_ai = self.p2_type_var.get() == "AI"
 
-        if p1_is_ai and p2_is_ai:
-            mode = "AVAI"
-        elif p2_is_ai:
-            mode = "PVAI"
-        elif p1_is_ai:
-            mode = "PVAI"
-        else:
-            mode = "PVP"
+        mode = "AVAI" if (p1_is_ai and p2_is_ai) else ("PVAI" if (p1_is_ai or p2_is_ai) else "PVP")
 
-        def get_limits(is_ai, diff_combo, mode_var, t_sl, d_sl):
+        def get_limits(is_ai, diff_cb, mode_var, t_sl, d_sl):
             if not is_ai:
                 return None, None
-            d = diff_combo.get()
+            d = diff_cb.get()
             if d in ("Custom-MCTS", "Medium-MCTS", "Hard-MCTS"):
                 return t_sl.get(), None
             if d == "Custom-ABC":
-                if mode_var.get() == "time":
-                    return t_sl.get(), None
-                else:
-                    return None, d_sl.get()
+                return (t_sl.get(), None) if mode_var.get() == "time" else (None, d_sl.get())
             return None, None
 
         p1_time, p1_depth = get_limits(p1_is_ai, self.p1_diff, self.p1_custom_mode,
@@ -789,6 +995,7 @@ class AnnuvinLauncher:
             "p1_depth_limit": p1_depth,
             "p2_time_limit":  p2_time,
             "p2_depth_limit": p2_depth,
+            "loaded_game":    self._loaded_game,
         }
         self.root.destroy()
         self.on_launch_callback(settings)
