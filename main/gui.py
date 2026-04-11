@@ -535,8 +535,9 @@ class AnnuvinGUI:
 
     def _save_log(self, winner):
         import datetime
+        os.makedirs("Logs", exist_ok=True)
         timestamp  = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename   = f"game_{timestamp}.txt"
+        filename   = os.path.join("Logs", f"game_{timestamp}.txt")
         total_time = time.time() - self.game_start_time
 
         lines = ["=" * 50, "ANNUVIN GAME LOG", "=" * 50]
@@ -595,8 +596,9 @@ class AnnuvinGUI:
 
     def save_game(self):
         import datetime
+        os.makedirs("Logs", exist_ok=True)
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename  = f"savegame_{timestamp}.txt"
+        filename  = os.path.join("Logs", f"savegame_{timestamp}.txt")
         with open(filename, "w") as f:
             f.write(f"{self.game.current_player}\n")
             f.write(f"{self.game.pieces[1]}\n")
