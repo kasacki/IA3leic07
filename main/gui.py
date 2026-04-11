@@ -22,10 +22,11 @@ class AnnuvinGUI:
         # --- Menu Bar ---
         self.menubar  = tk.Menu(root)
         self.filemenu = tk.Menu(self.menubar, tearoff=0)
-        self.filemenu.add_command(label="New Game",  command=self.reset_game)
-        self.filemenu.add_command(label="Save Game", command=self.save_game)
-        self.filemenu.add_command(label="Load Game", command=self.load_game)
-        self.filemenu.add_command(label="Save Log",  command=lambda: self._save_log_manual())
+        self.filemenu.add_command(label="New Game",       command=self.reset_game)
+        self.filemenu.add_command(label="Save Game",      command=self.save_game)
+        self.filemenu.add_command(label="Load Game",      command=self.load_game)
+        self.filemenu.add_command(label="Load from Log",  command=self.load_from_log)
+        self.filemenu.add_command(label="Save Log",       command=lambda: self._save_log_manual())
         self.filemenu.add_separator()
         self.filemenu.add_command(label="Exit", command=root.quit)
         self.menubar.add_cascade(label="File", menu=self.filemenu)
@@ -408,6 +409,145 @@ class AnnuvinGUI:
             messagebox.showinfo("Load", "Game loaded successfully!")
         except Exception as e:
             messagebox.showerror("Error", f"Could not load: {e}")
+    def load_from_log(self):
+        """Parse a game log file and replay all moves to restore the game state."""
+        from tkinter import filedialog
+        filepath = filedialog.askopenfilename(
+            title="Load Game from Log",
+            filetypes=[("Game logs", "*.txt"), ("All files", "*.*")]
+        )
+        if not filepath:
+            return
+
+        try:
+            with open(filepath, "r") as f:
+                lines = f.readlines()
+
+            # --- Parse header ---
+            p1_label = ""
+            p2_label = ""
+            moves_raw = []
+            in_moves  = False
+
+            for line in lines:
+                line = line.strip()
+                if line.startswith("Black    :"):
+                    p1_label = line.split(":", 1)[1].strip()
+                elif line.startswith("White    :"):
+                    p2_label = line.split(":", 1)[1].strip()
+                elif line.startswith("#") and "Player" in line:
+                    in_moves = True   # header row of the move table
+                    continue
+                elif in_moves and line.startswith("-"):
+                    continue
+                elif in_moves and line and line[0].isdigit():
+                    moves_raw.append(line)
+
+            if not moves_raw:
+                messagebox.showerror("Error", "No moves found in this log file.")
+                return
+
+            # --- Parse moves ---
+            # Format: "1     Black    AI (Medium-ABC)  (-2, 3)   (-3, 3)   0.013"
+            # Coordinates may contain spaces: (-2, 3) splits across tokens
+            parsed_moves = []
+            for row in moves_raw:
+                # Find all (x, y) coordinate pairs using regex
+                import re
+                coords = re.findall(r'\(-?\d+,\s*-?\d+\)', row)
+                if len(coords) >= 2:
+                    parsed_moves.append((
+                        ast.literal_eval(coords[0]),
+                        ast.literal_eval(coords[1])
+                    ))
+
+            if not parsed_moves:
+                messagebox.showerror("Error", "Could not parse any moves from this log.")
+                return
+
+            # --- Reconstruct game by replaying moves silently ---
+            game             = AnnuvinGame()
+            position_history = []
+            move_log         = []
+
+            for idx, (start, end) in enumerate(parsed_moves):
+                player = game.current_player
+                color  = "Black" if player == 1 else "White"
+                label  = p1_label if player == 1 else p2_label
+                move_log.append({
+                    "move_num": idx + 1,
+                    "player":   player,
+                    "color":    color,
+                    "label":    label,
+                    "start":    start,
+                    "end":      end,
+                    "elapsed":  0.0,
+                })
+                game.execute_move(start, end)
+                snapshot = (
+                    frozenset(game.pieces[1]),
+                    frozenset(game.pieces[2]),
+                    game.current_player
+                )
+                position_history.append(snapshot)
+
+            # --- Apply reconstructed state to GUI ---
+            self.game             = game
+            self.move_log         = move_log
+            self.position_history = position_history[-16:]
+            self.selected_hex     = None
+            self.hint_move        = None
+            self.last_move        = parsed_moves[-1] if parsed_moves else None
+            self._game_over       = False
+            self.game_start_time  = time.time()
+
+            # --- Restore player config from log header labels ---
+            known_diffs = [
+                "Medium-ABC", "Hard-ABC", "Medium-MCTS", "Hard-MCTS",
+                "Custom-ABC", "Custom-MCTS", "Beginner"
+            ]
+            for pnum, label in [(1, p1_label), (2, p2_label)]:
+                p_type = "Human"
+                p_diff = "Beginner"
+                if label.startswith("AI"):
+                    p_type = "AI"
+                    inner  = label[label.find("(")+1:label.find(")")] if "(" in label else label
+                    for k in known_diffs:
+                        if k.lower() in inner.lower():
+                            p_diff = k
+                            break
+                if pnum == 1:
+                    self.game.player1_type  = p_type
+                    self.game.p1_difficulty = p_diff
+                else:
+                    self.game.player2_type  = p_type
+                    self.game.p2_difficulty = p_diff
+
+            self.draw_board()
+
+            winner = self.game.check_winner()
+            if winner is not None:
+                self._game_over = True
+                if winner == 0:
+                    messagebox.showinfo("Log Loaded",
+                        f"Loaded {len(parsed_moves)} moves — this game ended in a draw.")
+                else:
+                    w_name = "Black" if winner == 1 else "White"
+                    messagebox.showinfo("Log Loaded",
+                        f"Loaded {len(parsed_moves)} moves — {w_name} already won.\n"
+                        f"Start a New Game to play again.")
+            else:
+                p_name = "Black" if game.current_player == 1 else "White"
+                dist   = game.get_max_distance(game.current_player)
+                self.status_label.config(
+                    text=f"{p_name}'s Turn (Move distance: {dist})"
+                )
+                messagebox.showinfo("Log Loaded",
+                    f"Loaded {len(parsed_moves)} moves.\nGame resumed — it's {p_name}'s turn.")
+                self.root.after(200, self.check_for_ai_turn)
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Could not load log: {e}")
 
 
 # ==================================================================
