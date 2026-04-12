@@ -290,12 +290,13 @@ class AnnuvinAI:
                        during rollouts when a capture is available
         """
         player_ai = self.game.current_player
-        root      = _MCTSNode(game=copy.deepcopy(self.game), parent=None, move=None)
+        root      = _MCTSNode(game=copy.deepcopy(self.game), parent=None, move=None,
+                              player_ai=player_ai)
         deadline  = time.time() + time_limit
 
         while time.time() < deadline:
             node   = self._mcts_select(root)
-            node   = self._mcts_expand(node)
+            node   = self._mcts_expand(node, player_ai)
             result = self._mcts_simulate(node.game, player_ai,
                                          capture_bias=capture_bias)
             self._mcts_backpropagate(node, result)
@@ -316,18 +317,24 @@ class AnnuvinAI:
             node = node.best_child(c=1.41)
         return node
 
-    # --- Expansion ---
-    def _mcts_expand(self, node):
+    # --- Expansion: prefer captures ---
+    def _mcts_expand(self, node, player_ai):
         if node.is_terminal():
             return node
 
         untried = node.untried_moves()
-        move    = random.choice(untried)
+        # Prefer capturing moves during expansion
+        opponent = 2 if node.game.current_player == 1 else 1
+        captures = [m for m in untried if m[1] in node.game.pieces[opponent]]
+        if captures and random.random() < 0.7:
+            move = random.choice(captures)
+        else:
+            move = random.choice(untried)
 
         sim = copy.deepcopy(node.game)
         sim.execute_move(*move)
 
-        child = _MCTSNode(game=sim, parent=node, move=move)
+        child = _MCTSNode(game=sim, parent=node, move=move, player_ai=player_ai)
         node.children.append(child)
         return child
 
@@ -422,10 +429,14 @@ class AnnuvinAI:
     # --- Backpropagation ---
     @staticmethod
     def _mcts_backpropagate(node, result):
+        """
+        result is from player_ai's perspective: 1.0 = AI wins, 0.0 = AI loses.
+        We store it consistently (no flipping) in every node.
+        UCB1 in best_child() handles the perspective flip based on whose turn it is.
+        """
         while node is not None:
             node.visits += 1
             node.wins   += result
-            result = 1.0 - result   # flip for the parent's player
             node = node.parent
 
     # ==================================================================
@@ -511,16 +522,18 @@ class AnnuvinAI:
 # ==================================================================
 
 class _MCTSNode:
-    __slots__ = ("game", "parent", "move", "children", "visits", "wins", "_untried")
+    __slots__ = ("game", "parent", "move", "children", "visits", "wins", "_untried", "player_ai")
 
-    def __init__(self, game, parent, move):
-        self.game     = game
-        self.parent   = parent
-        self.move     = move
-        self.children = []
-        self.visits   = 0
-        self.wins     = 0.0
-        self._untried = None
+    def __init__(self, game, parent, move, player_ai=None):
+        self.game      = game
+        self.parent    = parent
+        self.move      = move
+        self.children  = []
+        self.visits    = 0
+        self.wins      = 0.0
+        self._untried  = None
+        # player_ai: the AI player number (1 or 2) — used to orient UCB1
+        self.player_ai = player_ai
 
     def is_terminal(self):
         return self.game.check_winner() is not None
@@ -537,11 +550,23 @@ class _MCTSNode:
         return len(self.untried_moves()) == 0
 
     def best_child(self, c=1.41):
+        """
+        UCB1 from the perspective of the player who is TO MOVE at this node.
+        wins is stored from player_ai's perspective (1.0 = AI wins).
+        When it is player_ai's turn we maximise wins/visits.
+        When it is the opponent's turn we maximise (1 - wins/visits).
+        """
         log_parent = math.log(self.visits) if self.visits > 0 else 0
+        is_ai_turn = (self.game.current_player == self.player_ai)
+
         def ucb1(child):
             if child.visits == 0:
                 return float("inf")
-            return (child.wins / child.visits) + c * math.sqrt(log_parent / child.visits)
+            exploitation = child.wins / child.visits
+            if not is_ai_turn:
+                exploitation = 1.0 - exploitation
+            return exploitation + c * math.sqrt(log_parent / child.visits)
+
         return max(self.children, key=ucb1)
 
 
