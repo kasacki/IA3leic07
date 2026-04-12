@@ -3,11 +3,17 @@ from gui import AnnuvinLauncher, AnnuvinGUI
 from logic import AnnuvinGame
 
 
+def open_launcher():
+    launcher_root = tk.Tk()
+    launcher = AnnuvinLauncher(launcher_root, run_game)
+    launcher_root.mainloop()
+
+
 def run_game(settings):
     game_root = tk.Tk()
     game_root.title("Annuvin")
 
-    app = AnnuvinGUI(game_root)
+    app = AnnuvinGUI(game_root, on_new_game=open_launcher)
 
     # --- Apply player settings ---
     app.game.mode           = settings["mode"]
@@ -87,6 +93,4 @@ def run_game(settings):
 
 
 if __name__ == "__main__":
-    launcher_root = tk.Tk()
-    launcher = AnnuvinLauncher(launcher_root, run_game)
-    launcher_root.mainloop()
+    open_launcher()

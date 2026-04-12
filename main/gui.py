@@ -262,9 +262,10 @@ def label_to_settings(label):
 # ==================================================================
 
 class AnnuvinGUI:
-    def __init__(self, root):
+    def __init__(self, root, on_new_game=None):
         self.game             = AnnuvinGame()
         self.root             = root
+        self._on_new_game_cb  = on_new_game
         self.size             = 35
         self.selected_hex     = None
         self.hint_move        = None
@@ -631,6 +632,12 @@ class AnnuvinGUI:
     # Game management
     # ------------------------------------------------------------------
     def reset_game(self):
+        if self._on_new_game_cb is not None:
+            _sound_engine.cleanup()
+            self.root.destroy()
+            self._on_new_game_cb()
+            return
+        # Fallback: reset in-place (when launched without callback)
         self.game             = AnnuvinGame()
         self.selected_hex     = None
         self.last_move        = None
